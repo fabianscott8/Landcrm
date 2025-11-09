@@ -313,12 +313,29 @@
     const GEOCODE_THROTTLE_MS = typeof CRM.GEOCODE_THROTTLE_MS === "number" && CRM.GEOCODE_THROTTLE_MS>0 ? CRM.GEOCODE_THROTTLE_MS : (GEOCODE_PROVIDERS[0]?.throttleMs || 1200);
     const sampleLeads = Array.isArray(CRM.sampleLeads) && CRM.sampleLeads.length ? CRM.sampleLeads : DEFAULT_SAMPLE_LEADS;
     const sampleBuyers = Array.isArray(CRM.sampleBuyers) && CRM.sampleBuyers.length ? CRM.sampleBuyers : DEFAULT_SAMPLE_BUYERS;
+    const STORAGE_KEYS = {leads:"land_crm_leads", buyers:"land_crm_buyers"};
+    const readSavedRecords = (key)=>{
+      try{
+        if(typeof localStorage === "undefined") return null;
+        const raw = localStorage.getItem(key);
+        if(!raw) return null;
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : null;
+      }catch(err){
+        console.warn(`Failed to parse saved data for ${key}`, err);
+        return null;
+      }
+    };
 
     function App(){
       const [tab, setTab] = useState("leads");
 
       // Leads
-      const [leads, setLeads] = useState(()=> sampleLeads.map(cleanLeadRecord));
+      const [leads, setLeads] = useState(()=>{
+        const saved = readSavedRecords(STORAGE_KEYS.leads);
+        const base = saved && saved.length ? saved : sampleLeads;
+        return base.map(cleanLeadRecord);
+      });
       const [search, setSearch] = useState("");
       const [countyFilter, setCountyFilter] = useState("");
       const [selectedIndex, setSelectedIndex] = useState(0);
@@ -337,7 +354,11 @@
       const selectAllRef = useRef(null);
 
       // Buyers
-      const [buyers, setBuyers] = useState(()=> sampleBuyers.map(cleanBuyerRecord));
+      const [buyers, setBuyers] = useState(()=>{
+        const saved = readSavedRecords(STORAGE_KEYS.buyers);
+        const base = saved && saved.length ? saved : sampleBuyers;
+        return base.map(cleanBuyerRecord);
+      });
       const [selectedBuyerId, setSelectedBuyerId] = useState(null);
       const [buyerCounty, setBuyerCounty] = useState("");
       const [minAcres, setMinAcres] = useState("");
@@ -381,30 +402,25 @@
         });
       };
 
-      // Load / save
+      // Save updates locally
       useEffect(()=>{
         try{
-          const s = localStorage.getItem("land_crm_leads");
-          if (s){
-            const parsed = JSON.parse(s);
-            if(Array.isArray(parsed)){
-              setLeads(parsed.map(cleanLeadRecord));
-            }
+          if(typeof localStorage !== "undefined"){
+            localStorage.setItem(STORAGE_KEYS.leads, JSON.stringify(leads));
           }
-        }catch(err){ console.warn("Failed to load saved leads", err); }
+        }catch(err){
+          console.warn("Failed to persist leads", err);
+        }
+      },[leads]);
+      useEffect(()=>{
         try{
-          const b = localStorage.getItem("land_crm_buyers");
-          if (b){
-            const parsedB = JSON.parse(b);
-            if(Array.isArray(parsedB)){
-              setBuyers(parsedB.map(cleanBuyerRecord));
-            }
+          if(typeof localStorage !== "undefined"){
+            localStorage.setItem(STORAGE_KEYS.buyers, JSON.stringify(buyers));
           }
-        }catch(err){ console.warn("Failed to load saved buyers", err); }
-        setSelectedIndex(0);
-      },[]);
-      useEffect(()=>{ try{localStorage.setItem("land_crm_leads", JSON.stringify(leads));}catch{} },[leads]);
-      useEffect(()=>{ try{localStorage.setItem("land_crm_buyers", JSON.stringify(buyers));}catch{} },[buyers]);
+        }catch(err){
+          console.warn("Failed to persist buyers", err);
+        }
+      },[buyers]);
       useEffect(()=>{
         setBulkSelection(prev=>{
           const allowed = new Set(leads.map(l=>l.__id));
@@ -1008,6 +1024,7 @@
             <button className={tab==="leads"?"active":""} onClick={()=>setTab("leads")}>Leads</button>
             <button className={tab==="buyers"?"active":""} onClick={()=>setTab("buyers")}>Buyers</button>
           </div>
+          <div className="muted small mb-16">💾 All changes auto-save to this browser. Use the Load Sample buttons to restore the demo dataset.</div>
 
           {tab==="leads" ? (
             <>
