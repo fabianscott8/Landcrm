@@ -228,13 +228,11 @@
       const n = Number(raw);
       return Number.isFinite(n) ? n : undefined;
     });
-	const cleanLeadRecord = typeof CRM.cleanLeadRecord === "function" ? CRM.cleanLeadRecord : ((o={})=>({
-	  ...o,
-	  __history: sanitizeHistory(o.__history),
-	  __id: o.__id || makeId(),
-	  Latitude: toNumber(o["Latitude"]),
-	  Longitude: toNumber(o["Longitude"])
-	}));
+    const cleanLeadRecord = typeof CRM.cleanLeadRecord === "function" ? CRM.cleanLeadRecord : ((o={})=>({
+      ...o,
+      __history: sanitizeHistory(o.__history),
+      __id: o.__id || makeId()
+    }));
     const cleanBuyerRecord = typeof CRM.cleanBuyerRecord === "function" ? CRM.cleanBuyerRecord : ((o={})=>({
       ...o,
       __history: sanitizeHistory(o.__history),
@@ -828,10 +826,12 @@
                             <input type="date" value={selectedLead?.__lastContacted||""}
                               onChange={e=>{ if(!selectedLeadId) return; updateLeadById(selectedLeadId, current=>({...current,__lastContacted:e.target.value})); }} />
                           </div>
-                          <div className="mb-8">
-                            <textarea className="note" placeholder="Notes…" value={selectedLead?.__notes||""}
-                              onChange={e=>{ if(!selectedLeadId) return; updateLeadById(selectedLeadId, current=>({...current,__notes:e.target.value})); }}></textarea>
-                          </div>
+                          {selectedLead?.__notes ? (
+                            <div className="mb-8" style={{background:"#f1f5f9", borderRadius:"12px", padding:"12px"}}>
+                              <div className="muted" style={{fontSize:"11px", textTransform:"uppercase", letterSpacing:"0.05em"}}>Pinned Note</div>
+                              <div style={{whiteSpace:"pre-wrap", marginTop:"4px"}}>{selectedLead.__notes}</div>
+                            </div>
+                          ) : null}
 
                           <div className="row mt-16 mb-8" style={{alignItems:"center", justifyContent:"space-between"}}>
                             <div style={{fontWeight:600}}>🤝 Assign to Buyer</div>
@@ -964,11 +964,12 @@
                           <Info label="Email" value={selectedBuyer["Email"]} />
                         </div>
 
-                        <div className="mt-16">
-                          <div style={{fontWeight:600}} className="mb-8">🗒️ Internal Notes</div>
-                          <textarea className="note" placeholder="Notes…" value={selectedBuyer.__notes||""}
-                            onChange={e=>{ if(!selectedBuyerSafeId) return; updateBuyerById(selectedBuyerSafeId, current=>({...current,__notes:e.target.value})); }}></textarea>
-                        </div>
+                        {selectedBuyer.__notes ? (
+                          <div className="mt-16" style={{background:"#f1f5f9", borderRadius:"12px", padding:"12px"}}>
+                            <div className="muted" style={{fontSize:"11px", textTransform:"uppercase", letterSpacing:"0.05em"}}>Pinned Note</div>
+                            <div style={{whiteSpace:"pre-wrap", marginTop:"4px"}}>{selectedBuyer.__notes}</div>
+                          </div>
+                        ) : null}
 
                         <div className="mt-16">
                           <div style={{fontWeight:600}} className="mb-8">📁 Assigned Leads</div>
