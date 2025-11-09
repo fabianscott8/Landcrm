@@ -294,7 +294,9 @@
       const [geocodeBusy, setGeocodeBusy] = useState(false);
       const [geocodeProgress, setGeocodeProgress] = useState({done:0,total:0});
       const [geocodeStatus, setGeocodeStatus] = useState("");
+      const [bulkSelection, setBulkSelection] = useState(()=>[]);
       const geocodeCacheRef = useRef(new Map());
+      const selectAllRef = useRef(null);
 
       // Buyers
       const [buyers, setBuyers] = useState(()=> sampleBuyers.map(cleanBuyerRecord));
@@ -365,6 +367,21 @@
       },[]);
       useEffect(()=>{ try{localStorage.setItem("land_crm_leads", JSON.stringify(leads));}catch{} },[leads]);
       useEffect(()=>{ try{localStorage.setItem("land_crm_buyers", JSON.stringify(buyers));}catch{} },[buyers]);
+      useEffect(()=>{
+        setBulkSelection(prev=>{
+          const allowed = new Set(leads.map(l=>l.__id));
+          const next=[];
+          let changed=false;
+          for(const id of prev){
+            if(allowed.has(id)){
+              next.push(id);
+            }else{
+              changed=true;
+            }
+          }
+          return changed ? next : prev;
+        });
+      },[leads]);
 
       // CSV
       function parseCSV(text){
@@ -448,6 +465,7 @@
             const objs=rowsToObjects(rows).map(cleanLeadRecord);
             setLeads(prev=> importMode==="replace" ? objs : dedupeAppend(prev, objs));
             setSelectedIndex(0);
+            setBulkSelection([]);
           }catch(err){ alert("Unable to parse leads CSV: "+err); }
         };
         reader.readAsText(file);
@@ -686,6 +704,57 @@
 
       // Geocode
       const missingCount = useMemo(()=> leads.filter(l => !leadHasCoordinates(l)).length, [leads]);
+      const bulkSelectionSet = useMemo(()=> new Set(bulkSelection), [bulkSelection]);
+      const bulkSelectedCount = bulkSelection.length;
+      const bulkSelectedMissingCount = useMemo(()=>{
+        if(!bulkSelection.length) return 0;
+        let count=0;
+        for(const lead of leads){
+          if(bulkSelectionSet.has(lead.__id) && !leadHasCoordinates(lead)) count++;
+        }
+        return count;
+      },[leads, bulkSelection, bulkSelectionSet]);
+      const filteredSelectionCount = useMemo(()=>{
+        if(!filteredLeads.length || !bulkSelection.length) return 0;
+        let count=0;
+        for(const lead of filteredLeads){
+          if(bulkSelectionSet.has(lead.__id)) count++;
+        }
+        return count;
+      },[filteredLeads, bulkSelection, bulkSelectionSet]);
+      const filteredMissingCount = useMemo(()=>{
+        if(!filteredLeads.length) return 0;
+        let count=0;
+        for(const lead of filteredLeads){
+          if(!leadHasCoordinates(lead)) count++;
+        }
+        return count;
+      },[filteredLeads]);
+      const filteredMissingSelectedCount = useMemo(()=>{
+        if(!filteredLeads.length || !bulkSelection.length) return 0;
+        let count=0;
+        for(const lead of filteredLeads){
+          if(bulkSelectionSet.has(lead.__id) && !leadHasCoordinates(lead)) count++;
+        }
+        return count;
+      },[filteredLeads, bulkSelection, bulkSelectionSet]);
+      const geocodeAvailable = (missingCount>0) || selectedNeedsGeocode || (bulkSelectedMissingCount>0);
+      const geocodeButtonDisabled = geocodeBusy || !geocodeAvailable;
+      const geocodeButtonLabel = geocodeBusy
+        ? `Geocoding ${geocodeProgress.done}/${geocodeProgress.total}…`
+        : bulkSelectedMissingCount>0
+          ? `Geocode Selected (${bulkSelectedMissingCount}${bulkSelectedCount>bulkSelectedMissingCount ? `/${bulkSelectedCount}` : ""})`
+          : missingCount>0
+            ? `Geocode Missing (${missingCount})`
+            : selectedNeedsGeocode
+              ? "Geocode Selected Lead"
+              : "Geocode Missing (0)";
+      const allFilteredSelected = filteredLeads.length>0 && filteredSelectionCount===filteredLeads.length;
+      useEffect(()=>{
+        if(selectAllRef.current){
+          selectAllRef.current.indeterminate = filteredSelectionCount>0 && !allFilteredSelected;
+        }
+      },[filteredSelectionCount, allFilteredSelected]);
       const buildQueryFromLead = typeof CRM.buildGeocodeQuery === "function" ? CRM.buildGeocodeQuery : ((l)=>{
         if(!l) return "";
         const siteCity = l["City"] || l["Site City"];
@@ -710,6 +779,56 @@
         if(apn) return apn;
         return String(l["Owner Name"]||"").trim();
       });
+      const toggleBulkSelection = (id, checked)=>{
+        if(!id) return;
+        setBulkSelection(prev=>{
+          const next = new Set(prev);
+          const before = next.size;
+          if(checked){
+            next.add(id);
+          }else{
+            next.delete(id);
+          }
+          return next.size===before ? prev : Array.from(next);
+        });
+      };
+      const clearBulkSelection = ()=>{
+        setBulkSelection(prev=> prev.length ? [] : prev);
+      };
+      const toggleSelectFiltered = (checked)=>{
+        setBulkSelection(prev=>{
+          if(!filteredLeads.length) return prev;
+          const next = new Set(prev);
+          let changed=false;
+          if(checked){
+            for(const lead of filteredLeads){
+              if(!next.has(lead.__id)){
+                next.add(lead.__id);
+                changed=true;
+              }
+            }
+          }else{
+            for(const lead of filteredLeads){
+              if(next.delete(lead.__id)) changed=true;
+            }
+          }
+          return changed ? Array.from(next) : prev;
+        });
+      };
+      const selectFilteredMissing = ()=>{
+        if(!filteredLeads.length) return;
+        setBulkSelection(prev=>{
+          const next = new Set(prev);
+          let changed=false;
+          for(const lead of filteredLeads){
+            if(!leadHasCoordinates(lead) && !next.has(lead.__id)){
+              next.add(lead.__id);
+              changed=true;
+            }
+          }
+          return changed ? Array.from(next) : prev;
+        });
+      };
       async function lookupCoords(query){
         if(!query) return null;
         const cache = geocodeCacheRef.current;
@@ -735,22 +854,38 @@
       }
       async function geocodeMissing(){
         if(geocodeBusy) return;
-        let targets = leads.map((l,idx)=>({l,idx})).filter(x=> !leadHasCoordinates(x.l));
+        const selectionSize = bulkSelectionSet.size;
+        let targets = [];
+        let usingSelection = false;
+        if(selectionSize){
+          targets = leads.map((l,idx)=>({l,idx})).filter(x=> bulkSelectionSet.has(x.l.__id) && !leadHasCoordinates(x.l));
+          if(targets.length){
+            usingSelection = true;
+          }
+        }
+        if(!targets.length){
+          targets = leads.map((l,idx)=>({l,idx})).filter(x=> !leadHasCoordinates(x.l));
+        }
         if(!targets.length && selectedNeedsGeocode && selectedLeadId){
           const idx = leads.findIndex(l=>l.__id===selectedLeadId);
           if(idx!==-1) targets = [{l:leads[idx], idx}];
         }
         if(!targets.length){
-          setGeocodeStatus("All leads already have coordinates.");
+          if(selectionSize){
+            setGeocodeStatus("Selected leads already have coordinates.");
+          }else{
+            setGeocodeStatus("All leads already have coordinates.");
+          }
           return;
         }
         setGeocodeBusy(true);
-        setGeocodeStatus("Starting geocode run…");
+        setGeocodeStatus(usingSelection ? "Starting geocode for selected leads…" : "Starting geocode run…");
         setGeocodeProgress({done:0,total:targets.length});
         const updated=leads.slice();
         let changed=false;
         let successCount=0, failCount=0, skippedCount=0;
         let lastProvider="";
+        const successIds=[];
         for(let i=0;i<targets.length;i++){
           const {l,idx}=targets[i];
           const q=buildQueryFromLead(l);
@@ -769,6 +904,7 @@
                 updated[idx]={...updated[idx], Latitude:lat, Longitude:lon};
                 changed=true;
                 successCount++;
+                successIds.push(updated[idx].__id);
               }else{
                 failCount++;
               }
@@ -783,6 +919,16 @@
           if(i<targets.length-1) await sleep(1200);
         }
         if(changed) setLeads(updated.slice());
+        if(changed && successIds.length){
+          setBulkSelection(prev=>{
+            const next = new Set(prev);
+            let mutated=false;
+            for(const id of successIds){
+              if(next.delete(id)) mutated=true;
+            }
+            return mutated ? Array.from(next) : prev;
+          });
+        }
         setGeocodeBusy(false);
         const pieces=[];
         if(successCount) pieces.push(`Geocoded ${successCount} of ${targets.length} leads${lastProvider?` via ${lastProvider}`:""}.`);
@@ -818,19 +964,46 @@
                   {leadCounties.map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
                 <button className="btn brand" onClick={()=>exportCSV(leads,"Wholesale_Land_Leads.csv")}>Export CSV</button>
-                <button className="btn ghost" onClick={()=>{const sample=sampleLeads.map(cleanLeadRecord); setLeads(sample); setSelectedIndex(0);}}>Load Sample</button>
-                <button className="btn" disabled={geocodeBusy || (!missingCount && !selectedNeedsGeocode)} onClick={geocodeMissing}>
-                  {geocodeBusy
-                    ? `Geocoding ${geocodeProgress.done}/${geocodeProgress.total}…`
-                    : missingCount
-                      ? `Geocode Missing (${missingCount})`
-                      : selectedNeedsGeocode
-                        ? "Geocode Selected Lead"
-                        : "Geocode Missing (0)"}
+                <button className="btn ghost" onClick={()=>{const sample=sampleLeads.map(cleanLeadRecord); setLeads(sample); setSelectedIndex(0); setBulkSelection([]);}}>Load Sample</button>
+                <button className="btn" disabled={geocodeButtonDisabled} onClick={geocodeMissing}>
+                  {geocodeButtonLabel}
                 </button>
               </div>
               {geocodeStatus && (
                 <div className="muted" style={{fontSize:"12px", marginTop:"-8px", marginBottom:"8px"}}>{geocodeStatus}</div>
+              )}
+              {(filteredLeads.length || bulkSelectedCount) && (
+                <div className="row small" style={{marginBottom:"12px", gap:"8px", alignItems:"center", flexWrap:"wrap"}}>
+                  <div>
+                    <strong>{bulkSelectedCount}</strong> selected
+                    {bulkSelectedMissingCount ? ` • ${bulkSelectedMissingCount} missing lat/lon` : ""}
+                    {filteredLeads.length ? ` • In view: ${filteredSelectionCount}/${filteredLeads.length}` : ""}
+                  </div>
+                  <button
+                    className="btn ghost"
+                    style={{padding:"6px 10px", fontSize:"12px"}}
+                    onClick={()=>toggleSelectFiltered(!allFilteredSelected)}
+                    disabled={!filteredLeads.length}
+                  >
+                    {allFilteredSelected ? "Unselect Filtered" : "Select Filtered"}
+                  </button>
+                  <button
+                    className="btn ghost"
+                    style={{padding:"6px 10px", fontSize:"12px"}}
+                    onClick={selectFilteredMissing}
+                    disabled={!filteredMissingCount}
+                  >
+                    {filteredMissingSelectedCount ? `Select Missing (${filteredMissingSelectedCount}/${filteredMissingCount})` : `Select Missing (${filteredMissingCount})`}
+                  </button>
+                  <button
+                    className="btn ghost"
+                    style={{padding:"6px 10px", fontSize:"12px"}}
+                    onClick={clearBulkSelection}
+                    disabled={!bulkSelectedCount}
+                  >
+                    Clear Selection
+                  </button>
+                </div>
               )}
 
               <div className="grid grid-2">
@@ -841,17 +1014,43 @@
                   </div>
                   <div className="scroll">
                     <table>
-                      <thead><tr><th>Owner</th><th>County</th><th>Site Address</th><th>Est. Value</th></tr></thead>
+                      <thead>
+                        <tr>
+                          <th style={{width:"36px", textAlign:"center"}}>
+                            <input
+                              type="checkbox"
+                              ref={selectAllRef}
+                              checked={allFilteredSelected && !!filteredLeads.length}
+                              onChange={e=>toggleSelectFiltered(e.target.checked)}
+                              aria-checked={allFilteredSelected ? "true" : (filteredSelectionCount>0 ? "mixed" : "false")}
+                            />
+                          </th>
+                          <th>Owner</th>
+                          <th>County</th>
+                          <th>Site Address</th>
+                          <th>Est. Value</th>
+                        </tr>
+                      </thead>
                       <tbody>
-                        {filteredLeads.map((l,i)=>(
-                          <tr key={(l["APN"]||"")+i} className={i===selectedIndexSafe?"selected":""} onClick={()=>setSelectedIndex(i)} style={{cursor:"pointer"}}>
+                        {filteredLeads.map((l,i)=>{
+                          const id=l.__id;
+                          const inBulk=bulkSelectionSet.has(id);
+                          return (
+                          <tr key={id || (l["APN"]||"")+i} className={i===selectedIndexSafe?"selected":""} onClick={()=>setSelectedIndex(i)} style={{cursor:"pointer"}}>
+                            <td style={{textAlign:"center"}} onClick={e=>e.stopPropagation()}>
+                              <input
+                                type="checkbox"
+                                checked={inBulk}
+                                onChange={e=>{e.stopPropagation(); toggleBulkSelection(id, e.target.checked);}}
+                              />
+                            </td>
                             <td>{l["Owner Name"]||"—"}</td>
                             <td>{l["County"]||"—"}</td>
                             <td>{l["Site Address"]||"—"}</td>
                             <td>{l["Estimated Market Value"]||"—"}</td>
                           </tr>
-                        ))}
-                        {!filteredLeads.length && <tr><td colSpan="4" className="center" style={{padding:"24px"}}>No leads match your filters.</td></tr>}
+                        );})}
+                        {!filteredLeads.length && <tr><td colSpan="5" className="center" style={{padding:"24px"}}>No leads match your filters.</td></tr>}
                       </tbody>
                     </table>
                   </div>
