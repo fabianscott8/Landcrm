@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Wholesale Land CRM (Web)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{--bg:#f8fafc;--card:#fff;--ink:#0f172a;--muted:#64748b;--line:#e5e7eb;--brand:#059669;--brand2:#4f46e5;}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Noto Sans","Helvetica Neue",Arial}
+    h1{margin:16px 0}
+    .container{padding:24px}
+    .btn{border:1px solid transparent;background:#111827;color:#fff;padding:8px 12px;border-radius:8px;cursor:pointer}
+    .btn:hover{filter:brightness(0.95)}
+    .btn.ghost{background:#fff;border-color:#d1d5db;color:#111827}
+    .btn.brand{background:var(--brand)}
+    .btn.indigo{background:var(--brand2)}
+    .btn:disabled{background:#9ca3af;cursor:not-allowed}
+    .tabs button{border:1px solid #d1d5db;background:#fff;color:#111827;border-radius:8px;padding:8px 12px}
+    .tabs .active{background:var(--brand);color:#fff;border-color:transparent}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+    .input, select, textarea{border:1px solid #d1d5db;border-radius:8px;padding:8px 10px}
+    .input{min-width:260px}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+    .card .hd{border-bottom:1px solid var(--line);padding:12px 12px;font-weight:600;display:flex;justify-content:space-between;align-items:center}
+    table{border-collapse:collapse;width:100%}
+    th,td{border-bottom:1px solid var(--line);padding:8px;text-align:left}
+    thead th{background:#f3f4f6;color:#475569;font-size:12px;text-transform:uppercase}
+    .grid{display:grid;gap:16px}
+    @media(min-width:1024px){.grid-2{grid-template-columns:1fr 1fr}}
+    .hview{height:78vh;overflow:hidden}
+    .scroll{height:calc(78vh - 44px);overflow:auto}
+    .muted{color:var(--muted);font-size:12px}
+    .chip{border:1px solid #d1d5db;border-radius:6px;padding:4px 8px;font-size:12px;background:#fff;cursor:pointer}
+    .chip.active{background:var(--brand);color:#fff;border-color:transparent}
+    .note{width:100%;height:96px}
+    .table-lite{max-height:160px;overflow:auto}
+    .row-details{display:grid;grid-template-columns:1fr 1fr;gap:12px;border-top:1px solid var(--line);padding:12px}
+    .info label{display:block;color:#64748b;font-size:12px}
+    .info div{word-break:break-word;font-weight:600}
+    .mb-8{margin-bottom:8px}.mb-16{margin-bottom:16px}.mt-12{margin-top:12px}.mt-16{margin-top:16px}
+    .w-20{width:80px}.w-72{width:18rem}.small{font-size:12px}
+    .center{display:flex;align-items:center;justify-content:center}
+    .selected{background:#ecfdf5}
+    .kbd{background:#eef2ff;border:1px solid #c7d2fe;border-radius:6px;padding:2px 6px;font-size:12px}
+  </style>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <div class="container"><div id="root"></div></div>
+
+  <script type="text/babel">
+    const {useEffect, useMemo, useState} = React;
+
+    function App(){
+      const [tab, setTab] = useState("leads");
+
+      // Leads
+      const [leads, setLeads] = useState([]);
+      const [search, setSearch] = useState("");
+      const [countyFilter, setCountyFilter] = useState("");
+      const [selectedIndex, setSelectedIndex] = useState(0);
+      const [importMode, setImportMode] = useState("append");
+      const [mapEnabled, setMapEnabled] = useState(true);
+      const [mapType, setMapType] = useState("street");
+      const [compRadius, setCompRadius] = useState(5);
+      const [geocodeBusy, setGeocodeBusy] = useState(false);
+      const [geocodeProgress, setGeocodeProgress] = useState({done:0,total:0});
+
+      // Buyers
+      const [buyers, setBuyers] = useState([]);
+      const [buyerCounty, setBuyerCounty] = useState("");
+      const [minAcres, setMinAcres] = useState("");
+      const [maxAcres, setMaxAcres] = useState("");
+      const [minPrice, setMinPrice] = useState("");
+      const [maxPrice, setMaxPrice] = useState("");
+      const [buyersImportMode, setBuyersImportMode] = useState("append");
+
+      // Load / save
+      useEffect(()=>{
+        try{
+          const s = localStorage.getItem("land_crm_leads");
+          setLeads(s ? JSON.parse(s) : sampleLeads);
+          setSelectedIndex(0);
+        }catch{ setLeads(sampleLeads); setSelectedIndex(0); }
+        try{
+          const b = localStorage.getItem("land_crm_buyers");
+          if (b) setBuyers(JSON.parse(b));
+        }catch{}
+      },[]);
+      useEffect(()=>{ try{localStorage.setItem("land_crm_leads", JSON.stringify(leads));}catch{} },[leads]);
+      useEffect(()=>{ try{localStorage.setItem("land_crm_buyers", JSON.stringify(buyers));}catch{} },[buyers]);
+
+      // CSV
+      function parseCSV(text){
+        const rows=[]; let cur=[], val="", inQ=false;
+        const endVal=()=>{cur.push(val);val="";}; const endRow=()=>{rows.push(cur);cur=[];};
+        for(let i=0;i<text.length;i++){
+          const c=text[i];
+          if(inQ){
+            if(c==='\"'){ if(text[i+1]==='\"'){val+='\"';i++;} else {inQ=false;} }
+            else { val+=c; }
+          }else{
+            if(c==='\"'){ inQ=true; }
+            else if(c===',') endVal();
+            else if(c==='\n'){ endVal(); endRow(); }
+            else if(c==='\r'){ /* ignore */ }
+            else { val+=c; }
+          }
+        }
+        endVal(); if(cur.length) endRow();
+        while(rows.length && rows[rows.length-1].every(x=>x==="")) rows.pop();
+        return rows;
+      }
+      function normalizeHeaders(headers){
+        const map = {
+          "owner 1 full name":"Owner Name","owner 1 first name":"Owner Name","owner name":"Owner Name",owner:"Owner Name",
+          county:"County","property county":"County","situs city":"Site City","situs state":"Site State","situs zip":"Site Zip",
+          "situs house number":"Site Address","situs street name":"Site Address","property address":"Site Address",address:"Site Address",
+          apn:"APN","assessor parcel number (apn)":"APN","lot acreage":"Acreage",acreage:"Acreage",latitude:"Latitude",longitude:"Longitude",
+          "estimated value":"Estimated Market Value","est. value":"Estimated Market Value","estimated market value":"Estimated Market Value",
+          phone:"Phone 1","phone 1":"Phone 1","phone 2":"Phone 2",email:"Email",
+          "first name":"First Name","last name":"Last Name","company name":"Company Name","street address":"Street Address",
+          city:"City",state:"State",zip:"Zip","mail street address":"Mail Street Address","mail city":"Mail City","mail state":"Mail State","mail zip":"Mail Zip",
+          cell:"Cell","cell 2":"Cell 2","cell 3":"Cell 3",landline:"Landline","landline 2":"Landline 2","landline 3":"Landline 3","landline 4":"Landline 4",
+          "email 1":"Email 1","email 2":"Email 2","email 3":"Email 3","dnc":"DNC","dnc 2":"DNC 2","dnc 3":"DNC 3","dnc 4":"DNC 4",
+          status:"Status",type:"Type","lot acres":"Acreage","lot size (acres)":"Acreage"
+        };
+        const seen={};
+        return headers.map(hRaw=>{
+          const h=String(hRaw||"").trim();
+          const norm = map[h.toLowerCase()] || h;
+          if (seen[norm]==null){ seen[norm]=0; return norm; }
+          seen[norm]+=1; return `${norm} (${seen[norm]})`;
+        });
+      }
+      function rowsToObjects(rows){
+        if(!rows.length) return [];
+        const headers = normalizeHeaders(rows[0]);
+        const out = [];
+        for(let i=1;i<rows.length;i++){
+          const r=rows[i]; if(!r || r.every(x=>String(x||"").trim()==="")) continue;
+          const o={}; for(let c=0;c<headers.length;c++) o[headers[c]]=r[c]??"";
+          if(!o["Owner Name"]){
+            const comp=(o["Company Name"]||"").trim();
+            const fn=(o["First Name"]||"").trim(), ln=(o["Last Name"]||"").trim();
+            const person=[fn,ln].filter(Boolean).join(" ");
+            o["Owner Name"] = comp && person ? `${comp} — ${person}` : (comp || person);
+          }
+          if(!o["Site Address"]){
+            const street=(o["Street Address"]||"").trim();
+            const city=(o["City"]||"").trim(), state=(o["State"]||"").trim(), zip=(o["Zip"]||"").trim();
+            const parts=[street,[city,state].filter(Boolean).join(", "),zip].filter(Boolean);
+            if(parts.length) o["Site Address"]=parts.join(", ");
+          }
+          if(!o["County"]) o["County"]="";
+          out.push(o);
+        }
+        return out;
+      }
+      const toNumber = (x)=>{ const n=Number(String(x??"").replace(/[$,\s]/g,"")); return Number.isFinite(n)?n:undefined; };
+      const cleanLeadRecord = (o)=>({
+        ...o,
+        "Owner Name":o["Owner Name"]||"", County:o["County"]||"", "Site Address":o["Site Address"]||"",
+        "Estimated Market Value":o["Estimated Market Value"]||"", APN:o["APN"]||"",
+        Latitude: toNumber(o["Latitude"]), Longitude: toNumber(o["Longitude"]),
+        Acreage: o["Acreage"] || o["Lot Acres"] || o["Lot Size (acres)"] || "",
+        "First Name": o["First Name"]||o["First Name (0)"]||"", "Last Name": o["Last Name"]||o["Last Name (0)"]||"",
+        "Company Name": o["Company Name"]||"", "Street Address": o["Street Address"]||"", City:o["City"]||"", State:o["State"]||"", Zip:o["Zip"]||"",
+        Cell:o["Cell"]||"", "Cell 2":o["Cell 2"]||"", "Cell 3":o["Cell 3"]||"", Landline:o["Landline"]||"", "Landline 2":o["Landline 2"]||"", "Landline 3":o["Landline 3"]||"", "Landline 4":o["Landline 4"]||"",
+        "Email 1":o["Email 1"]||o["Email"]||"", "Email 2":o["Email 2"]||"", "Email 3":o["Email 3"]||"",
+        Status: o["Status"]||"New", Type: o["Type"]||"Seller Lead",
+        __notes:o.__notes||"", __lastContacted:o.__lastContacted||"", __nextAction:o.__nextAction||"", __tags:Array.isArray(o.__tags)?o.__tags:[]
+      });
+      const leadKey = (o)=>`${(o["APN"]||"").toLowerCase()}|${(o["Site Address"]||"").toLowerCase()}`;
+      const dedupeAppend = (existing, incoming)=>{
+        const seen = new Set(existing.map(leadKey)); const merged=existing.slice();
+        for(const it of incoming){ const k=leadKey(it); if(!seen.has(k)){ merged.push(it); seen.add(k);} }
+        return merged;
+      };
+      function handleLeadUpload(e){
+        const file=e.target.files?.[0]; if(!file) return;
+        const reader=new FileReader();
+        reader.onload=(evt)=>{
+          try{
+            const rows=parseCSV(String(evt.target.result||""));
+            const objs=rowsToObjects(rows).map(cleanLeadRecord);
+            setLeads(prev=> importMode==="replace" ? objs : dedupeAppend(prev, objs));
+            setSelectedIndex(0);
+          }catch(err){ alert("Unable to parse leads CSV: "+err); }
+        };
+        reader.readAsText(file);
+      }
+      function handleBuyerUpload(e){
+        const file=e.target.files?.[0]; if(!file) return;
+        const reader=new FileReader();
+        reader.onload=(evt)=>{
+          try{
+            const rows=parseCSV(String(evt.target.result||""));
+            const objs=rowsToObjects(rows);
+            setBuyers(prev=> buyersImportMode==="replace" ? objs : prev.concat(objs));
+          }catch(err){ alert("Unable to parse buyers CSV: "+err); }
+        };
+        reader.readAsText(file);
+      }
+
+      // Derived
+      const filteredLeads = React.useMemo(()=>{
+        let list=leads;
+        const q=search.trim().toLowerCase();
+        if(q) list=list.filter(l => (l["Owner Name"]||"").toLowerCase().includes(q) || (l["County"]||"").toLowerCase().includes(q) || (l["Site Address"]||"").toLowerCase().includes(q));
+        if(countyFilter) list=list.filter(l => (l["County"]||"").toLowerCase()===countyFilter.toLowerCase());
+        return list;
+      },[leads,search,countyFilter]);
+      const leadCounties = React.useMemo(()=>{
+        const set=new Set(); for(const l of leads) if(l["County"]) set.add(String(l["County"]).trim());
+        return Array.from(set).sort((a,b)=>a.localeCompare(b));
+      },[leads]);
+      const selectedLead = filteredLeads[selectedIndex] || filteredLeads[0];
+
+      // Map URL
+      const mapURL = React.useMemo(()=>{
+        if(!selectedLead || typeof selectedLead?.Latitude!=="number" || typeof selectedLead?.Longitude!=="number") return "";
+        const lat=selectedLead.Latitude, lon=selectedLead.Longitude;
+        if(mapType==="satellite") return `https://www.google.com/maps?hl=en&q=${lat},${lon}&t=k&z=16&output=embed`;
+        const d=0.01; const bbox=`${lon-d},${lat-d},${lon+d},${lat+d}`;
+        return `https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik&marker=${lat},${lon}`;
+      },[selectedLead,mapType]);
+
+      // Buyers
+      const buyerCounties = React.useMemo(()=>{
+        const set=new Set(); for(const b of buyers)(b["Buy Box - Counties"]||"").split(/[,;|]/).forEach(x=>{ const v=x.trim(); if(v) set.add(v); });
+        return Array.from(set).sort((a,b)=>a.localeCompare(b));
+      },[buyers]);
+      const filteredBuyers = React.useMemo(()=>{
+        const n=(x)=>{ const v=Number(String(x??"").replace(/[$,\s]/g,"")); return Number.isFinite(v)?v:undefined; };
+        const minA=n(minAcres)??-Infinity, maxA=n(maxAcres)??Infinity;
+        const minP=n(minPrice)??-Infinity, maxP=n(maxPrice)??Infinity;
+        return buyers.filter(b=>{
+          const acresOK = (()=>{ const lo=n(b["Min Acres"])??-Infinity, hi=n(b["Max Acres"])??Infinity; return lo<=maxA && hi>=minA; })();
+          const priceOK = (()=>{ const lo=n(b["Min Price"])??-Infinity, hi=n(b["Max Price"])??Infinity; return lo<=maxP && hi>=minP; })();
+          const countyOK = !buyerCounty || (b["Buy Box - Counties"]||"").toLowerCase().includes(buyerCounty.toLowerCase());
+          return acresOK && priceOK && countyOK;
+        });
+      },[buyers,minAcres,maxAcres,minPrice,maxPrice,buyerCounty]);
+
+      // Export
+      function exportCSV(data, filename){
+        if(!data?.length) return;
+        const headers = Object.keys(data[0]);
+        const body = data.map(row => headers.map(h => `"${String((row[h]??"")).replaceAll('"','""')}"`).join(",")).join("\n");
+        const csv = headers.join(",") + "\n" + body;
+        const blob = new Blob([csv], {type:"text/csv;charset=utf-8;"}); const url=URL.createObjectURL(blob);
+        const a=document.createElement("a"); a.href=url; a.download=filename; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+      }
+
+      // Comps
+      function haversineMiles(lat1, lon1, lat2, lon2){
+        const toRad=(d)=>d*Math.PI/180, R=3958.8;
+        const dLat=toRad(lat2-lat1), dLon=toRad(lon2-lon1);
+        const a=Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+        return 2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a))*R/ R; // simplified below
+      }
+      // correct return:
+      function distMiles(a1,b1,a2,b2){
+        const toRad=(d)=>d*Math.PI/180, R=3958.8;
+        const dLat=toRad(a2-a1), dLon=toRad(b2-b1);
+        const A=Math.sin(dLat/2)**2 + Math.cos(toRad(a1))*Math.cos(toRad(a2))*Math.sin(dLon/2)**2;
+        return 2*R*Math.atan2(Math.sqrt(A),Math.sqrt(1-A));
+      }
+
+      const comps = React.useMemo(()=>{
+        const sel=selectedLead;
+        if(!sel || typeof sel?.Latitude!=="number" || typeof sel?.Longitude!=="number") return [];
+        const out=[];
+        for(const l of leads){
+          if(l===sel) continue;
+          const lat=l?.Latitude, lon=l?.Longitude;
+          if(typeof lat!=="number" || typeof lon!=="number") continue;
+          const distance=distMiles(sel.Latitude, sel.Longitude, lat, lon);
+          if(distance<=compRadius) out.push({
+            owner:l["Owner Name"]||"—", address:l["Site Address"]||"—", county:l["County"]||"—",
+            value:l["Estimated Market Value"]||"", acreage:l["Acreage"]||"", distance
+          });
+        }
+        return out.sort((a,b)=>a.distance-b.distance).slice(0,50);
+      },[leads,selectedLead,compRadius]);
+
+      // Geocode
+      const missingCount = useMemo(()=> leads.filter(l => typeof l?.Latitude!=='number' || typeof l?.Longitude!=='number').length, [leads]);
+      const buildQueryFromLead = (l)=> [l["Site Address"], l["County"]].filter(Boolean).join(", ") || String(l["APN"]||"").trim();
+      async function geocodeMissing(){
+        if(geocodeBusy) return;
+        const targets = leads.map((l,idx)=>({l,idx})).filter(x=> typeof x.l?.Latitude!=='number' || typeof x.l?.Longitude!=='number');
+        if(!targets.length) return;
+        setGeocodeBusy(true); setGeocodeProgress({done:0,total:targets.length});
+        const updated=leads.slice();
+        for(let i=0;i<targets.length;i++){
+          const {l,idx}=targets[i]; const q=buildQueryFromLead(l); if(!q){ setGeocodeProgress({done:i+1,total:targets.length}); continue; }
+          try{
+            const url=`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1&addressdetails=0&email=sample@example.com`;
+            const res=await fetch(url,{headers:{'Accept-Language':'en'}});
+            if(res.ok){
+              const js=await res.json();
+              if(Array.isArray(js) && js[0]){
+                const lat=Number(js[0].lat), lon=Number(js[0].lon);
+                if(Number.isFinite(lat)&&Number.isFinite(lon)){ updated[idx]={...updated[idx], Latitude:lat, Longitude:lon}; setLeads(updated.slice()); }
+              }
+            }
+          }catch(e){ console.warn("Geocode failed for", q, e); }
+          setGeocodeProgress({done:i+1,total:targets.length});
+          await new Promise(r=>setTimeout(r,1200));
+        }
+        setGeocodeBusy(false);
+      }
+
+      // UI
+      return (
+        <>
+          <h1>🏡 Wholesale Land CRM (Web)</h1>
+          <div className="tabs row mb-16">
+            <button className={tab==="leads"?"active":""} onClick={()=>setTab("leads")}>Leads</button>
+            <button className={tab==="buyers"?"active":""} onClick={()=>setTab("buyers")}>Buyers</button>
+          </div>
+
+          {tab==="leads" ? (
+            <>
+              <div className="row mb-16">
+                <input type="file" accept=".csv" onChange={handleLeadUpload} className="w-72"/>
+                <div className="row">
+                  <label className="small">Import mode:</label>
+                  <select value={importMode} onChange={e=>setImportMode(e.target.value)}>
+                    <option value="append">Append (de-dup)</option>
+                    <option value="replace">Replace all</option>
+                  </select>
+                </div>
+                <input className="input" placeholder="Search owner, county, or address" value={search} onChange={e=>setSearch(e.target.value)} />
+                <select value={countyFilter} onChange={e=>setCountyFilter(e.target.value)}>
+                  <option value="">All Counties</option>
+                  {leadCounties.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+                <button className="btn brand" onClick={()=>exportCSV(leads,"Wholesale_Land_Leads.csv")}>Export CSV</button>
+                <button className="btn ghost" onClick={()=>{setLeads(sampleLeads); setSelectedIndex(0);}}>Load Sample</button>
+                <button className="btn" disabled={geocodeBusy||missingCount===0} onClick={geocodeMissing}>
+                  {geocodeBusy? `Geocoding ${geocodeProgress.done}/${geocodeProgress.total}…` : `Geocode Missing (${missingCount})`}
+                </button>
+              </div>
+
+              <div className="grid grid-2">
+                <div className="card hview">
+                  <div className="hd">
+                    <div>📋 Leads ({filteredLeads.length})</div>
+                    <div className="muted">Tip: Missing coordinates? Use <span className="kbd">Geocode Missing</span>.</div>
+                  </div>
+                  <div className="scroll">
+                    <table>
+                      <thead><tr><th>Owner</th><th>County</th><th>Site Address</th><th>Est. Value</th></tr></thead>
+                      <tbody>
+                        {filteredLeads.map((l,i)=>(
+                          <tr key={(l["APN"]||"")+i} className={i===selectedIndex?"selected":""} onClick={()=>setSelectedIndex(i)} style={{cursor:"pointer"}}>
+                            <td>{l["Owner Name"]||"—"}</td>
+                            <td>{l["County"]||"—"}</td>
+                            <td>{l["Site Address"]||"—"}</td>
+                            <td>{l["Estimated Market Value"]||"—"}</td>
+                          </tr>
+                        ))}
+                        {!filteredLeads.length && <tr><td colSpan="4" className="center" style={{padding:"24px"}}>No leads match your filters.</td></tr>}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="card hview">
+                  <div className="hd">
+                    <div>🗺️ Map & Details</div>
+                    <div className="row small">
+                      <label><input type="checkbox" checked={mapEnabled} onChange={e=>setMapEnabled(e.target.checked)} /> Map</label>
+                      <label>Map Type:
+                        <select value={mapType} onChange={e=>setMapType(e.target.value)}>
+                          <option value="street">Street</option>
+                          <option value="satellite">Satellite</option>
+                        </select>
+                      </label>
+                    </div>
+                  </div>
+                  <div style={{display:"grid",gridTemplateRows:"1fr auto auto"}}>
+                    <div className="center" style={{position:"relative"}}>
+                      {mapEnabled && mapURL
+                        ? <iframe title="map" src={mapURL} style={{border:0,width:"100%",height:"100%"}} loading="lazy" referrerPolicy="no-referrer-when-downgrade"></iframe>
+                        : <div className="muted" style={{padding:"24px",textAlign:"center"}}>Provide coordinates to view map.</div>}
+                    </div>
+
+                    <div className="row-details">
+                      <Info label="Owner" value={selectedLead?.["Owner Name"]} />
+                      <Info label="County" value={selectedLead?.["County"]} />
+                      <Info label="Address" value={selectedLead?.["Site Address"]} />
+                      <Info label="APN" value={selectedLead?.["APN"]} />
+                      <Info label="Acreage" value={selectedLead?.["Acreage"]} />
+                      <Info label="Est. Value" value={selectedLead?.["Estimated Market Value"]} />
+                      <Info label="Latitude" value={String(selectedLead?.["Latitude"] ?? "")} />
+                      <Info label="Longitude" value={String(selectedLead?.["Longitude"] ?? "")} />
+                    </div>
+
+                    <div style={{borderTop:"1px solid var(--line)",padding:"12px"}}>
+                      <div className="row mb-8">
+                        {["New","Attempted","Contacted","Offer Sent","Under Contract","Dead"].map(s=>(
+                          <span key={s} className={"chip "+(selectedLead?.Status===s?"active":"")} onClick={()=>{
+                            const idx=leads.indexOf(selectedLead); const clone=leads.slice(); clone[idx]={...selectedLead, Status:s}; setLeads(clone);
+                          }}>{s}</span>
+                        ))}
+                      </div>
+                      <div className="row mb-8">
+                        <input className="input" placeholder="Next Action (e.g., Call Tue 10am)" value={selectedLead?.__nextAction||''}
+                          onChange={e=>{ const idx=leads.indexOf(selectedLead); const clone=leads.slice(); clone[idx]={...selectedLead,__nextAction:e.target.value}; setLeads(clone);} }/>
+                        <input type="date" value={selectedLead?.__lastContacted||''}
+                          onChange={e=>{ const idx=leads.indexOf(selectedLead); const clone=leads.slice(); clone[idx]={...selectedLead,__lastContacted:e.target.value}; setLeads(clone);} }/>
+                      </div>
+                      <textarea className="note" placeholder="Notes…" value={selectedLead?.__notes||''}
+                        onChange={e=>{ const idx=leads.indexOf(selectedLead); const clone=leads.slice(); clone[idx]={...selectedLead,__notes:e.target.value}; setLeads(clone);} }></textarea>
+
+                      <div className="row mt-16 mb-8" style={{justifyContent:"space-between"}}>
+                        <div style={{fontWeight:600}}>📌 Nearby Comps</div>
+                        <div className="row small">
+                          <span>Radius (miles)</span>
+                          <input className="w-20" type="number" min="1" step="1" value={compRadius}
+                            onChange={e=>setCompRadius(Math.max(1, Number(e.target.value)||1))}/>
+                        </div>
+                      </div>
+                      {comps.length ? (
+                        <div className="table-lite">
+                          <table>
+                            <thead><tr><th>Dist (mi)</th><th>Owner</th><th>Address</th><th>County</th><th>Est. Value</th><th>Acreage</th></tr></thead>
+                            <tbody>
+                              {comps.map((c,i)=>(
+                                <tr key={i}><td>{c.distance.toFixed(2)}</td><td>{c.owner}</td><td>{c.address}</td><td>{c.county}</td><td>{c.value||"—"}</td><td>{c.acreage||"—"}</td></tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : <div className="muted">No comps found within {compRadius} miles.</div> }
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="card mt-16" style={{padding:"16px"}}>
+                <AddLeadForm onAdd={(obj)=>{ const cleaned=cleanLeadRecord(obj); setLeads(prev=>dedupeAppend(prev,[cleaned])); setSelectedIndex(0); }}/>
+              </div>
+
+              <Tests/>
+            </>
+          ) : (
+            <>
+              <div className="row mb-16">
+                <input type="file" accept=".csv" onChange={handleBuyerUpload} className="w-72"/>
+                <div className="row">
+                  <label className="small">Import mode:</label>
+                  <select value={buyersImportMode} onChange={e=>setBuyersImportMode(e.target.value)}>
+                    <option value="append">Append</option>
+                    <option value="replace">Replace all</option>
+                  </select>
+                </div>
+                <select value={buyerCounty} onChange={e=>setBuyerCounty(e.target.value)}>
+                  <option value="">All Counties</option>
+                  {buyerCounties.map(c=><option key={c} value={c}>{c}</option>)}
+                </select>
+                <input className="input" placeholder="Min Acres" value={minAcres} onChange={e=>setMinAcres(e.target.value)} />
+                <input className="input" placeholder="Max Acres" value={maxAcres} onChange={e=>setMaxAcres(e.target.value)} />
+                <input className="input" placeholder="Min Price" value={minPrice} onChange={e=>setMinPrice(e.target.value)} />
+                <input className="input" placeholder="Max Price" value={maxPrice} onChange={e=>setMaxPrice(e.target.value)} />
+                <button className="btn brand" onClick={()=>exportCSV(buyers,"Wholesale_Land_Buyers.csv")}>Export CSV</button>
+              </div>
+
+              <div className="card">
+                <div className="hd">🧰 Buyers ({filteredBuyers.length})</div>
+                <div style={{maxHeight:"78vh",overflow:"auto"}}>
+                  <table>
+                    <thead><tr><th>Buyer / Company</th><th>Counties</th><th>Acres</th><th>Price</th><th>Funding</th><th>Contact</th></tr></thead>
+                    <tbody>
+                      {filteredBuyers.map((b,i)=>(
+                        <tr key={(b["Buyer Name / Company"]||i)+"-"+i}>
+                          <td>{b["Buyer Name / Company"]||"—"}</td>
+                          <td>{b["Buy Box - Counties"]||"—"}</td>
+                          <td>{[b["Min Acres"], b["Max Acres"]].filter(Boolean).join(" - ") || "—"}</td>
+                          <td>{[b["Min Price"], b["Max Price"]].filter(Boolean).join(" - ") || "—"}</td>
+                          <td>{b["Funding Type (Cash/Hard Money)"]||"—"}</td>
+                          <td>{[b["Phone"], b["Email"]].filter(Boolean).join(" | ") || "—"}</td>
+                        </tr>
+                      ))}
+                      {!filteredBuyers.length && <tr><td colSpan="6" className="center" style={{padding:"24px"}}>No buyers match your filters.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="card mt-16" style={{padding:"16px"}}>
+                <AddBuyerForm onAdd={(obj)=> setBuyers(prev=>prev.concat([obj])) }/>
+              </div>
+
+              <div className="card mt-16" style={{padding:"16px"}}>
+                <div className="muted">CSV buyer headers: <code>Buyer Name / Company, Phone, Email, Buy Box - Counties, Buy Box - States, Min Acres, Max Acres, Min Price, Max Price, Funding Type (Cash/Hard Money)</code></div>
+              </div>
+            </>
+          )}
+        </>
+      );
+    }
+
+    function Info({label, value}){ return <div className="info"><label>{label}</label><div>{value||"—"}</div></div>; }
+
+    function AddLeadForm({onAdd}){
+      const [form,setForm]=React.useState({"Owner Name":"",County:"","Site Address":"","Estimated Market Value":"",Latitude:"",Longitude:"",APN:"",Acreage:""});
+      return (
+        <div>
+          <div style={{fontWeight:600}} className="mb-8">➕ Add a Single Lead</div>
+          <div className="row">
+            {Object.keys(form).map(k=>(
+              <input key={k} className="input" placeholder={k} value={form[k]} onChange={e=>setForm({...form,[k]:e.target.value})}/>
+            ))}
+          </div>
+          <div className="row mt-12">
+            <button className="btn brand" onClick={()=>onAdd(form)}>Add Lead</button>
+            <button className="btn ghost" onClick={()=>setForm({"Owner Name":"",County:"","Site Address":"","Estimated Market Value":"",Latitude:"",Longitude:"",APN:"",Acreage:""})}>Clear</button>
+          </div>
+        </div>
+      );
+    }
+
+    function AddBuyerForm({onAdd}){
+      const [form,setForm]=React.useState({"Buyer Name / Company":"","Phone":"","Email":"","Buy Box - Counties":"","Buy Box - States":"","Min Acres":"","Max Acres":"","Min Price":"","Max Price":"","Funding Type (Cash/Hard Money)":""
+      });
+      return (
+        <div>
+          <div style={{fontWeight:600}} className="mb-8">➕ Add a Single Buyer</div>
+          <div className="row">
+            {Object.keys(form).map(k=>(
+              <input key={k} className="input" placeholder={k} value={form[k]} onChange={e=>setForm({...form,[k]:e.target.value})}/>
+            ))}
+          </div>
+          <div className="row mt-12">
+            <button className="btn brand" onClick={()=>onAdd(form)}>Add Buyer</button>
+            <button className="btn ghost" onClick={()=>setForm({"Buyer Name / Company":"","Phone":"","Email":"","Buy Box - Counties":"","Buy Box - States":"","Min Acres":"","Max Acres":"","Min Price":"","Max Price":"","Funding Type (Cash/Hard Money)":""
+            })}>Clear</button>
+          </div>
+        </div>
+      );
+    }
+
+    function Tests(){
+      return (
+        <div className="card mt-16" style={{padding:"16px"}}>
+          <div style={{fontWeight:600}} className="mb-8">✅ Built-in Test Cases</div>
+          <ul>
+            <li>Load Sample → click rows → map shows by default; toggle Street/Satellite.</li>
+            <li>Upload your PropStream contact export CSV → rows & contact details appear.</li>
+            <li>Switch Import mode between <i>Append</i> (de-dup APN+Address) and <i>Replace</i>.</li>
+            <li>Use <b>Geocode Missing</b> to add coordinates for rows without lat/lon (progress updates, saved locally).</li>
+            <li>Use <b>Estimate Selected</b> / <b>Estimate All Missing</b> for auto-valuation from comps.</li>
+            <li>Adjust comps radius to see nearby properties from your dataset.</li>
+            <li>Buyers: upload CSV, filter by county, acres, and price; add single buyer.</li>
+            <li>Refresh the page — everything persists via LocalStorage.</li>
+          </ul>
+        </div>
+      );
+    }
+
+    const sampleLeads = [
+      { "Owner Name": "John & Jane Sample", County: "Citrus", "Site Address": "1234 W Elm Dr, Citrus Springs, FL 34433", "Estimated Market Value": "$12,500", Latitude: 28.9723, Longitude: -82.4891, APN: "18E17S100010 01230 0120", Acreage: "0.24" },
+      { "Owner Name": "Acme Holdings LLC", County: "Citrus", "Site Address": "9876 N Maple Way, Citrus Springs, FL 34433", "Estimated Market Value": "$14,900", Latitude: 28.9677, Longitude: -82.4612, APN: "18E17S100020 04560 0070", Acreage: "0.25" },
+    ];
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+  </script>
+</body>
+</html>
