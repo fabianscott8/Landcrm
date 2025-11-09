@@ -215,7 +215,22 @@
       "Phone","Phone 1","Phone 2","Phone 3","Other Phone","Primary Phone","Secondary Phone"
     ];
     const EMAIL_FIELDS = ["Email","Email 1","Email 2","Email 3","Primary Email","Secondary Email"];
-    const leadHasCoordinates = (lead)=> Number.isFinite(lead?.Latitude) && Number.isFinite(lead?.Longitude);
+    const normalizeCoordinate = typeof CRM.normalizeCoordinate === "function" ? CRM.normalizeCoordinate : ((value)=>{
+      if(value === null || value === undefined) return undefined;
+      if(typeof value === "number") return Number.isFinite(value) ? value : undefined;
+      const raw = String(value).trim();
+      if(!raw) return undefined;
+      const cleaned = raw.replace(/[^0-9.\-]/g, "");
+      if(!cleaned || cleaned === "-" || cleaned === "." || cleaned === "-." || cleaned === ".-") return undefined;
+      const numeric = Number(cleaned);
+      return Number.isFinite(numeric) ? numeric : undefined;
+    });
+    const leadHasCoordinates = typeof CRM.leadHasCoordinates === "function" ? CRM.leadHasCoordinates : ((lead)=>{
+      if(!lead || typeof lead !== "object") return false;
+      const lat = normalizeCoordinate(lead?.Latitude);
+      const lon = normalizeCoordinate(lead?.Longitude);
+      return Number.isFinite(lat) && Number.isFinite(lon);
+    });
     const normalizePhoneHref = (value)=>{
       const digits = String(value ?? "").replace(/[^0-9+]/g,"");
       if(!digits) return "";
@@ -248,6 +263,8 @@
     });
     const cleanLeadRecord = typeof CRM.cleanLeadRecord === "function" ? CRM.cleanLeadRecord : ((o={})=>({
       ...o,
+      Latitude: normalizeCoordinate(o.Latitude),
+      Longitude: normalizeCoordinate(o.Longitude),
       __history: sanitizeHistory(o.__history),
       __id: o.__id || makeId()
     }));
@@ -669,24 +686,30 @@
 
       // Geocode
       const missingCount = useMemo(()=> leads.filter(l => !leadHasCoordinates(l)).length, [leads]);
-      const buildQueryFromLead = (l)=>{
+      const buildQueryFromLead = typeof CRM.buildGeocodeQuery === "function" ? CRM.buildGeocodeQuery : ((l)=>{
         if(!l) return "";
         const siteCity = l["City"] || l["Site City"];
         const siteState = l["State"] || l["Site State"];
         const siteZip = l["Zip"] || l["Site Zip"];
-        const parts = [];
-        if(l["Site Address"]) parts.push(l["Site Address"]);
         const cityState = [siteCity, siteState].filter(Boolean).join(", ");
-        if(cityState) parts.push(cityState);
-        if(siteZip) parts.push(siteZip);
-        if(l["County"]) parts.push(`${l["County"]} County`);
-        if(parts.length) return parts.join(", ");
-        const mailingParts = [l["Street Address"], siteCity, siteState, siteZip].filter(Boolean);
-        if(mailingParts.length) return mailingParts.join(", ");
+        if(l["Site Address"]){
+          const parts = [l["Site Address"]];
+          if(cityState) parts.push(cityState);
+          if(siteZip) parts.push(siteZip);
+          if(l["County"]) parts.push(`${l["County"]} County`);
+          return parts.join(", ");
+        }
+        const mailingParts = [l["Street Address"], cityState, siteZip].filter(Boolean);
+        if(mailingParts.length){
+          if(l["County"]){
+            mailingParts.push(`${l["County"]} County`);
+          }
+          return mailingParts.join(", ");
+        }
         const apn = String(l["APN"]||"").trim();
         if(apn) return apn;
         return String(l["Owner Name"]||"").trim();
-      };
+      });
       async function lookupCoords(query){
         if(!query) return null;
         const cache = geocodeCacheRef.current;

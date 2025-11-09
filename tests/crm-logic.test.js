@@ -8,6 +8,9 @@ const {
   cleanBuyerRecord,
   cleanLeadRecord,
   makeHistoryEntry,
+  normalizeCoordinate,
+  leadHasCoordinates,
+  buildGeocodeQuery,
   sanitizeHistory,
   sampleBuyers,
   sampleLeads,
@@ -47,6 +50,39 @@ test('cleanLeadRecord fills defaults and preserves identifiers', () => {
   assert.equal(normalized.__history.length, 1);
   assert.ok(normalized.__history[0].id);
   assert.equal(normalized.__history[0].type, 'Note');
+});
+
+test('normalizeCoordinate and leadHasCoordinates handle string inputs safely', () => {
+  assert.equal(normalizeCoordinate(' 28.1234 '), 28.1234);
+  assert.equal(normalizeCoordinate('-82.501 '), -82.501);
+  assert.equal(normalizeCoordinate(''), undefined);
+  assert.equal(normalizeCoordinate(' - '), undefined);
+  const lead = { Latitude: '28.9723', Longitude: '-82.4891' };
+  assert.equal(leadHasCoordinates(lead), true);
+  const missing = { Latitude: '', Longitude: null };
+  assert.equal(leadHasCoordinates(missing), false);
+});
+
+test('buildGeocodeQuery assembles address fallbacks', () => {
+  const lead = {
+    'Site Address': '123 Main St',
+    City: 'Ocala',
+    State: 'FL',
+    Zip: '34470',
+    County: 'Marion'
+  };
+  assert.equal(buildGeocodeQuery(lead), '123 Main St, Ocala, FL, 34470, Marion County');
+  const fallback = {
+    'Site Address': '',
+    'Street Address': '456 Pine Ave',
+    City: 'Ocala',
+    State: 'FL',
+    Zip: '34470',
+    APN: '123-456'
+  };
+  assert.equal(buildGeocodeQuery(fallback), '456 Pine Ave, Ocala, FL, 34470');
+  const ownerOnly = { 'Owner Name': 'Sample Owner' };
+  assert.equal(buildGeocodeQuery(ownerOnly), 'Sample Owner');
 });
 
 test('cleanBuyerRecord keeps ids and normalizes history', () => {

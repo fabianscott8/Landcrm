@@ -41,6 +41,46 @@
   const formatDateTime = (iso)=>{ try{ return new Date(iso).toLocaleString(); }catch{ return iso || ""; } };
   const makeHistoryEntry = (type, note)=>({id:makeId(), type:type||"Note", note, timestamp:new Date().toISOString()});
   const toNumber = (x)=>{ const raw=String(x??"").replace(/[$,\s]/g,""); if(!raw) return undefined; const n=Number(raw); return Number.isFinite(n)?n:undefined; };
+  const normalizeCoordinate = (value)=>{
+    if(value === null || value === undefined) return undefined;
+    if(typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+    const raw = String(value).trim();
+    if(!raw) return undefined;
+    const cleaned = raw.replace(/[^0-9.\-]/g, '');
+    if(!cleaned || cleaned === '-' || cleaned === '.' || cleaned === '-.' || cleaned === '.-') return undefined;
+    const numeric = Number(cleaned);
+    return Number.isFinite(numeric) ? numeric : undefined;
+  };
+  const leadHasCoordinates = (lead)=>{
+    if(!lead || typeof lead !== 'object') return false;
+    const lat = normalizeCoordinate(lead.Latitude);
+    const lon = normalizeCoordinate(lead.Longitude);
+    return Number.isFinite(lat) && Number.isFinite(lon);
+  };
+  const buildGeocodeQuery = (l)=>{
+    if(!l) return '';
+    const siteCity = l["City"] || l["Site City"];
+    const siteState = l["State"] || l["Site State"];
+    const siteZip = l["Zip"] || l["Site Zip"];
+    const cityState = [siteCity, siteState].filter(Boolean).join(', ');
+    if(l["Site Address"]){
+      const parts = [l["Site Address"]];
+      if(cityState) parts.push(cityState);
+      if(siteZip) parts.push(siteZip);
+      if(l["County"]) parts.push(`${l["County"]} County`);
+      return parts.join(', ');
+    }
+    const mailingParts = [l["Street Address"], cityState, siteZip].filter(Boolean);
+    if(mailingParts.length){
+      if(l["County"]){
+        mailingParts.push(`${l["County"]} County`);
+      }
+      return mailingParts.join(', ');
+    }
+    const apn = String(l["APN"]||'').trim();
+    if(apn) return apn;
+    return String(l["Owner Name"]||'').trim();
+  };
   function sanitizeHistory(list){
     if(!Array.isArray(list)) return [];
     return list.map(entry=>{
@@ -60,7 +100,7 @@
       ...o,
       "Owner Name":o["Owner Name"]||"", County:o["County"]||"", "Site Address":o["Site Address"]||"",
       "Estimated Market Value":o["Estimated Market Value"]||"", APN:o["APN"]||"",
-      Latitude: toNumber(o["Latitude"]), Longitude: toNumber(o["Longitude"]),
+      Latitude: normalizeCoordinate(o["Latitude"]), Longitude: normalizeCoordinate(o["Longitude"]),
       Acreage: o["Acreage"] || o["Lot Acres"] || o["Lot Size (acres)"] || "",
       "First Name": o["First Name"]||o["First Name (0)"]||"", "Last Name": o["Last Name"]||o["Last Name (0)"]||"",
       "Company Name": o["Company Name"]||"", "Street Address": o["Street Address"]||"", City:o["City"]||"", State:o["State"]||"", Zip:o["Zip"]||"",
@@ -200,7 +240,10 @@
     sampleLeads,
     sampleBuyers,
     isoDaysAgo,
-    dateDaysAgo
+    dateDaysAgo,
+    normalizeCoordinate,
+    leadHasCoordinates,
+    buildGeocodeQuery
   };
   if(typeof module !== 'undefined' && module.exports){
     module.exports = logic;
