@@ -4,7 +4,7 @@ Goal: Fix geocoding false-positive (“Selected leads already have coordinates�
 
 ## Current Problem
 - Geocode button often shows “Selected leads already have coordinates” when many selected rows **do not** have valid Latitude/Longitude.
-- Root cause: loose truthiness checks on `Latitude/Longitude` treating `"—"`, `""`, `"0"`, or strings as "has value". Also coords are often stored as strings.
+- Root cause: loose truthiness checks on `Latitude/Longitude` treating "—", `""`, `"0"`, or strings as "has value". Also coords are often stored as strings.
 
 ## Required Fix (Must)
 1) **Numeric normalization on import**
