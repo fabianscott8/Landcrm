@@ -10,6 +10,8 @@ const {
   cleanLeadRecord,
   makeHistoryEntry,
   normalizeCoordinate,
+  normalizeLatitude,
+  normalizeLongitude,
   leadHasCoordinates,
   buildGeocodeQuery,
   sanitizeHistory,
@@ -55,15 +57,21 @@ test('cleanLeadRecord fills defaults and preserves identifiers', () => {
   assert.equal(normalized.__history[0].type, 'Note');
 });
 
-test('normalizeCoordinate and leadHasCoordinates handle string inputs safely', () => {
+test('normalizeCoordinate variants and leadHasCoordinates handle inputs safely', () => {
   assert.equal(normalizeCoordinate(' 28.1234 '), 28.1234);
   assert.equal(normalizeCoordinate('-82.501 '), -82.501);
   assert.equal(normalizeCoordinate(''), undefined);
   assert.equal(normalizeCoordinate(' - '), undefined);
+  assert.equal(normalizeLatitude('91'), undefined);
+  assert.equal(normalizeLatitude('-91.1'), undefined);
+  assert.equal(normalizeLongitude('181'), undefined);
+  assert.equal(normalizeLongitude('-181'), undefined);
   const lead = { Latitude: '28.9723', Longitude: '-82.4891' };
   assert.equal(leadHasCoordinates(lead), true);
   const missing = { Latitude: '', Longitude: null };
   assert.equal(leadHasCoordinates(missing), false);
+  const zeroed = { Latitude: '0', Longitude: '0' };
+  assert.equal(leadHasCoordinates(zeroed), false);
 });
 
 test('buildGeocodeQuery assembles address fallbacks', () => {
@@ -138,6 +146,17 @@ test('geocodeWithNominatim fetches and parses coordinates', async () => {
   const coords = await geocodeWithNominatim('123 Sample Rd, Town, ST', fakeFetch);
   assert.deepEqual(coords, { lat: 28.101, lon: -82.302, provider: 'OpenStreetMap' });
   assert.equal(called, 1);
+});
+
+test('geocodeWithNominatim filters placeholder coordinates', async () => {
+  const fakeFetch = async () => ({
+    ok: true,
+    async json(){
+      return [{ lat: '0', lon: '0' }];
+    }
+  });
+  const coords = await geocodeWithNominatim('Any query', fakeFetch);
+  assert.equal(coords, null);
 });
 
 test('sample data hydrates into clean records', () => {

@@ -56,6 +56,40 @@
 
     const CRM = window.CRM_LOGIC || {};
     const DEFAULT_HISTORY_TYPES = ["Note","Call","Offer","Follow-up","Task","Status","Assignment","Lead Assignment"];
+    const rawCoordinateToNumber = typeof CRM.normalizeCoordinate === "function"
+      ? CRM.normalizeCoordinate
+      : ((value)=>{
+          if(value === null || value === undefined) return undefined;
+          if(typeof value === "number") return Number.isFinite(value) ? value : undefined;
+          const raw = String(value).trim();
+          if(!raw) return undefined;
+          const cleaned = raw.replace(/[^0-9.\-]/g, "");
+          if(!cleaned || /^-?\.?$/.test(cleaned)) return undefined;
+          const numeric = Number(cleaned);
+          return Number.isFinite(numeric) ? numeric : undefined;
+        });
+    const normalizeLatitude = typeof CRM.normalizeLatitude === "function"
+      ? CRM.normalizeLatitude
+      : ((value)=>{
+          const numeric = rawCoordinateToNumber(value);
+          if(!Number.isFinite(numeric)) return undefined;
+          if(numeric < -90 || numeric > 90) return undefined;
+          return numeric;
+        });
+    const normalizeLongitude = typeof CRM.normalizeLongitude === "function"
+      ? CRM.normalizeLongitude
+      : ((value)=>{
+          const numeric = rawCoordinateToNumber(value);
+          if(!Number.isFinite(numeric)) return undefined;
+          if(numeric < -180 || numeric > 180) return undefined;
+          return numeric;
+        });
+    const coordinatesLookValid = (lat, lon)=>{
+      if(!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+      if(Math.abs(lat) <= 1e-9 && Math.abs(lon) <= 1e-9) return false;
+      return true;
+    };
+    const normalizeCoordinate = rawCoordinateToNumber;
     const DEFAULT_GEOCODE_PROVIDERS = [
       {
         name: "OpenStreetMap",
@@ -63,8 +97,9 @@
         buildUrl: (query)=>`https://nominatim.openstreetmap.org/search?format=json&limit=1&addressdetails=0&email=landcrm-demo@example.com&q=${encodeURIComponent(query)}`,
         parse: (payload)=>{
           if(Array.isArray(payload) && payload[0]){
-            const lat=Number(payload[0].lat), lon=Number(payload[0].lon);
-            if(Number.isFinite(lat) && Number.isFinite(lon)) return {lat, lon};
+            const lat = normalizeLatitude(payload[0].lat ?? payload[0].latitude);
+            const lon = normalizeLongitude(payload[0].lon ?? payload[0].lng ?? payload[0].longitude);
+            if(coordinatesLookValid(lat, lon)) return {lat, lon};
           }
           return null;
         }
@@ -193,21 +228,11 @@
       "Phone","Phone 1","Phone 2","Phone 3","Other Phone","Primary Phone","Secondary Phone"
     ];
     const EMAIL_FIELDS = ["Email","Email 1","Email 2","Email 3","Primary Email","Secondary Email"];
-    const normalizeCoordinate = typeof CRM.normalizeCoordinate === "function" ? CRM.normalizeCoordinate : ((value)=>{
-      if(value === null || value === undefined) return undefined;
-      if(typeof value === "number") return Number.isFinite(value) ? value : undefined;
-      const raw = String(value).trim();
-      if(!raw) return undefined;
-      const cleaned = raw.replace(/[^0-9.\-]/g, "");
-      if(!cleaned || cleaned === "-" || cleaned === "." || cleaned === "-." || cleaned === ".-") return undefined;
-      const numeric = Number(cleaned);
-      return Number.isFinite(numeric) ? numeric : undefined;
-    });
     const leadHasCoordinates = typeof CRM.leadHasCoordinates === "function" ? CRM.leadHasCoordinates : ((lead)=>{
       if(!lead || typeof lead !== "object") return false;
-      const lat = normalizeCoordinate(lead?.Latitude);
-      const lon = normalizeCoordinate(lead?.Longitude);
-      return Number.isFinite(lat) && Number.isFinite(lon);
+      const lat = normalizeLatitude(lead?.Latitude);
+      const lon = normalizeLongitude(lead?.Longitude);
+      return coordinatesLookValid(lat, lon);
     });
     const normalizePhoneHref = (value)=>{
       const digits = String(value ?? "").replace(/[^0-9+]/g,"");
@@ -241,8 +266,8 @@
     });
     const cleanLeadRecord = typeof CRM.cleanLeadRecord === "function" ? CRM.cleanLeadRecord : ((o={})=>({
       ...o,
-      Latitude: normalizeCoordinate(o.Latitude),
-      Longitude: normalizeCoordinate(o.Longitude),
+      Latitude: normalizeLatitude(o.Latitude),
+      Longitude: normalizeLongitude(o.Longitude),
       __history: sanitizeHistory(o.__history),
       __id: o.__id || makeId()
     }));
@@ -834,9 +859,13 @@
             const data = await res.json();
             const coords = provider.parse(data);
             if(coords){
-              const result = {...coords, provider:provider.name};
-              cache.set(query, result);
-              return result;
+              const lat = normalizeLatitude(coords.lat ?? coords.latitude);
+              const lon = normalizeLongitude(coords.lon ?? coords.lng ?? coords.longitude);
+              if(coordinatesLookValid(lat, lon)){
+                const result = {lat, lon, provider:provider.name};
+                cache.set(query, result);
+                return result;
+              }
             }
           }catch(err){
             console.warn(`Geocode provider ${provider.name} failed for ${query}`, err);
@@ -891,9 +920,9 @@
             const coords = await lookupCoords(q);
             if(coords){
               lastProvider = coords.provider || lastProvider;
-              const lat=Number(coords.lat ?? coords.latitude);
-              const lon=Number(coords.lon ?? coords.lng ?? coords.longitude);
-              if(Number.isFinite(lat) && Number.isFinite(lon)){
+              const lat = normalizeLatitude(coords.lat ?? coords.latitude);
+              const lon = normalizeLongitude(coords.lon ?? coords.lng ?? coords.longitude);
+              if(coordinatesLookValid(lat, lon)){
                 updated[idx]={...updated[idx], Latitude:lat, Longitude:lon};
                 changed=true;
                 successCount++;

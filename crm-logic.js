@@ -3,6 +3,36 @@
   const sleep = (ms)=> new Promise(resolve=>setTimeout(resolve, ms));
   const GEOCODE_THROTTLE_MS = 1200;
   const NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/search";
+  const COORDINATE_PLACEHOLDER_THRESHOLD = 1e-9;
+
+  const rawCoordinateToNumber = (value)=>{
+    if(value === null || value === undefined) return undefined;
+    if(typeof value === "number") return Number.isFinite(value) ? value : undefined;
+    const raw = String(value).trim();
+    if(!raw) return undefined;
+    const cleaned = raw.replace(/[^0-9.\-]/g, "");
+    if(!cleaned || /^-?\.?$/.test(cleaned)) return undefined;
+    const numeric = Number(cleaned);
+    return Number.isFinite(numeric) ? numeric : undefined;
+  };
+  const normalizeLatitude = (value)=>{
+    const numeric = rawCoordinateToNumber(value);
+    if(!Number.isFinite(numeric)) return undefined;
+    if(numeric < -90 || numeric > 90) return undefined;
+    return numeric;
+  };
+  const normalizeLongitude = (value)=>{
+    const numeric = rawCoordinateToNumber(value);
+    if(!Number.isFinite(numeric)) return undefined;
+    if(numeric < -180 || numeric > 180) return undefined;
+    return numeric;
+  };
+  const normalizeCoordinate = rawCoordinateToNumber;
+  const coordinatesLookValid = (lat, lon)=>{
+    if(!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+    if(Math.abs(lat) <= COORDINATE_PLACEHOLDER_THRESHOLD && Math.abs(lon) <= COORDINATE_PLACEHOLDER_THRESHOLD) return false;
+    return true;
+  };
   const GEOCODE_PROVIDERS = [
     {
       name: "OpenStreetMap",
@@ -10,8 +40,9 @@
       buildUrl: (query)=>`${NOMINATIM_ENDPOINT}?format=json&limit=1&addressdetails=0&email=landcrm-demo@example.com&q=${encodeURIComponent(query)}`,
       parse: (payload)=>{
         if(Array.isArray(payload) && payload[0]){
-          const lat=Number(payload[0].lat), lon=Number(payload[0].lon);
-          if(Number.isFinite(lat) && Number.isFinite(lon)) return {lat, lon};
+          const lat = normalizeLatitude(payload[0].lat ?? payload[0].latitude);
+          const lon = normalizeLongitude(payload[0].lon ?? payload[0].lng ?? payload[0].longitude);
+          if(coordinatesLookValid(lat, lon)) return {lat, lon};
         }
         return null;
       }
@@ -34,7 +65,11 @@
       if(!res || !res.ok) return null;
       const payload = await res.json();
       const coords = GEOCODE_PROVIDERS[0].parse(payload);
-      return coords ? {...coords, provider: GEOCODE_PROVIDERS[0].name} : null;
+      if(!coords) return null;
+      const lat = normalizeLatitude(coords.lat ?? coords.latitude);
+      const lon = normalizeLongitude(coords.lon ?? coords.lng ?? coords.longitude);
+      if(!coordinatesLookValid(lat, lon)) return null;
+      return {lat, lon, provider: GEOCODE_PROVIDERS[0].name};
     }catch(err){
       console.warn("OpenStreetMap geocode failed", err);
       return null;
@@ -44,21 +79,11 @@
   const formatDateTime = (iso)=>{ try{ return new Date(iso).toLocaleString(); }catch{ return iso || ""; } };
   const makeHistoryEntry = (type, note)=>({id:makeId(), type:type||"Note", note, timestamp:new Date().toISOString()});
   const toNumber = (x)=>{ const raw=String(x??"").replace(/[$,\s]/g,""); if(!raw) return undefined; const n=Number(raw); return Number.isFinite(n)?n:undefined; };
-  const normalizeCoordinate = (value)=>{
-    if(value === null || value === undefined) return undefined;
-    if(typeof value === 'number') return Number.isFinite(value) ? value : undefined;
-    const raw = String(value).trim();
-    if(!raw) return undefined;
-    const cleaned = raw.replace(/[^0-9.\-]/g, '');
-    if(!cleaned || cleaned === '-' || cleaned === '.' || cleaned === '-.' || cleaned === '.-') return undefined;
-    const numeric = Number(cleaned);
-    return Number.isFinite(numeric) ? numeric : undefined;
-  };
   const leadHasCoordinates = (lead)=>{
     if(!lead || typeof lead !== 'object') return false;
-    const lat = normalizeCoordinate(lead.Latitude);
-    const lon = normalizeCoordinate(lead.Longitude);
-    return Number.isFinite(lat) && Number.isFinite(lon);
+    const lat = normalizeLatitude(lead.Latitude);
+    const lon = normalizeLongitude(lead.Longitude);
+    return coordinatesLookValid(lat, lon);
   };
   const buildGeocodeQuery = (l)=>{
     if(!l) return '';
@@ -103,7 +128,7 @@
       ...o,
       "Owner Name":o["Owner Name"]||"", County:o["County"]||"", "Site Address":o["Site Address"]||"",
       "Estimated Market Value":o["Estimated Market Value"]||"", APN:o["APN"]||"",
-      Latitude: normalizeCoordinate(o["Latitude"]), Longitude: normalizeCoordinate(o["Longitude"]),
+      Latitude: normalizeLatitude(o["Latitude"]), Longitude: normalizeLongitude(o["Longitude"]),
       Acreage: o["Acreage"] || o["Lot Acres"] || o["Lot Size (acres)"] || "",
       "First Name": o["First Name"]||o["First Name (0)"]||"", "Last Name": o["Last Name"]||o["Last Name (0)"]||"",
       "Company Name": o["Company Name"]||"", "Street Address": o["Street Address"]||"", City:o["City"]||"", State:o["State"]||"", Zip:o["Zip"]||"",
@@ -245,6 +270,8 @@
     isoDaysAgo,
     dateDaysAgo,
     normalizeCoordinate,
+    normalizeLatitude,
+    normalizeLongitude,
     leadHasCoordinates,
     buildGeocodeQuery,
     GEOCODE_THROTTLE_MS,
