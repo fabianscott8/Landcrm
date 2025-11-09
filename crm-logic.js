@@ -1,42 +1,45 @@
 (function(global){
   const HISTORY_TYPES = ["Note","Call","Offer","Follow-up","Task","Status","Assignment","Lead Assignment"];
   const sleep = (ms)=> new Promise(resolve=>setTimeout(resolve, ms));
+  const GEOCODE_THROTTLE_MS = 1200;
+  const NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/search";
   const GEOCODE_PROVIDERS = [
     {
       name: "OpenStreetMap",
-      buildUrl: (query)=>`https://nominatim.openstreetmap.org/search?format=json&limit=1&addressdetails=0&email=landcrm-demo@example.com&q=${encodeURIComponent(query)}`,
+      throttleMs: GEOCODE_THROTTLE_MS,
+      buildUrl: (query)=>`${NOMINATIM_ENDPOINT}?format=json&limit=1&addressdetails=0&email=landcrm-demo@example.com&q=${encodeURIComponent(query)}`,
       parse: (payload)=>{
         if(Array.isArray(payload) && payload[0]){
           const lat=Number(payload[0].lat), lon=Number(payload[0].lon);
-          if(Number.isFinite(lat) && Number.isFinite(lon)) return {lat, lon};
-        }
-        return null;
-      }
-    },
-    {
-      name: "Maps.co",
-      buildUrl: (query)=>`https://geocode.maps.co/search?q=${encodeURIComponent(query)}&limit=1`,
-      parse: (payload)=>{
-        if(Array.isArray(payload) && payload[0]){
-          const lat=Number(payload[0].lat), lon=Number(payload[0].lon);
-          if(Number.isFinite(lat) && Number.isFinite(lon)) return {lat, lon};
-        }
-        return null;
-      }
-    },
-    {
-      name: "Open-Meteo",
-      buildUrl: (query)=>`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=1&language=en`,
-      parse: (payload)=>{
-        const result = payload?.results?.[0];
-        if(result){
-          const lat=Number(result.latitude), lon=Number(result.longitude);
           if(Number.isFinite(lat) && Number.isFinite(lon)) return {lat, lon};
         }
         return null;
       }
     }
   ];
+  let lastGeocodeAt = 0;
+  async function awaitGeocodeWindow(now = Date.now()){
+    const elapsed = now - lastGeocodeAt;
+    if(lastGeocodeAt && elapsed < GEOCODE_THROTTLE_MS){
+      await sleep(GEOCODE_THROTTLE_MS - elapsed);
+    }
+    lastGeocodeAt = Date.now();
+  }
+  async function geocodeWithNominatim(query, fetchImpl){
+    if(!query || typeof fetchImpl !== "function") return null;
+    await awaitGeocodeWindow();
+    const url = GEOCODE_PROVIDERS[0].buildUrl(query);
+    try{
+      const res = await fetchImpl(url,{headers:{"Accept":"application/json"}});
+      if(!res || !res.ok) return null;
+      const payload = await res.json();
+      const coords = GEOCODE_PROVIDERS[0].parse(payload);
+      return coords ? {...coords, provider: GEOCODE_PROVIDERS[0].name} : null;
+    }catch(err){
+      console.warn("OpenStreetMap geocode failed", err);
+      return null;
+    }
+  }
   const makeId = ()=>`id_${Math.random().toString(36).slice(2)}_${Date.now().toString(36)}`;
   const formatDateTime = (iso)=>{ try{ return new Date(iso).toLocaleString(); }catch{ return iso || ""; } };
   const makeHistoryEntry = (type, note)=>({id:makeId(), type:type||"Note", note, timestamp:new Date().toISOString()});
@@ -243,7 +246,10 @@
     dateDaysAgo,
     normalizeCoordinate,
     leadHasCoordinates,
-    buildGeocodeQuery
+    buildGeocodeQuery,
+    GEOCODE_THROTTLE_MS,
+    awaitGeocodeWindow,
+    geocodeWithNominatim
   };
   if(typeof module !== 'undefined' && module.exports){
     module.exports = logic;

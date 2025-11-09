@@ -8,6 +8,10 @@ This project is a static, browser-based CRM prototype. To see the live preview:
 
 All changes you make in the UI persist automatically in `localStorage`.
 
+## Geocoding
+
+The **Geocode via OpenStreetMap** button reverse-geocodes the selected or missing-coordinate leads using OpenStreetMap's Nominatim service. Requests are throttled to one every 1.2 seconds to remain within the public usage policy.
+
 ## Testing
 
 Run the Node.js test suite to exercise the shared CRM helpers:

@@ -59,33 +59,11 @@
     const DEFAULT_GEOCODE_PROVIDERS = [
       {
         name: "OpenStreetMap",
+        throttleMs: 1200,
         buildUrl: (query)=>`https://nominatim.openstreetmap.org/search?format=json&limit=1&addressdetails=0&email=landcrm-demo@example.com&q=${encodeURIComponent(query)}`,
         parse: (payload)=>{
           if(Array.isArray(payload) && payload[0]){
             const lat=Number(payload[0].lat), lon=Number(payload[0].lon);
-            if(Number.isFinite(lat) && Number.isFinite(lon)) return {lat, lon};
-          }
-          return null;
-        }
-      },
-      {
-        name: "Maps.co",
-        buildUrl: (query)=>`https://geocode.maps.co/search?q=${encodeURIComponent(query)}&limit=1`,
-        parse: (payload)=>{
-          if(Array.isArray(payload) && payload[0]){
-            const lat=Number(payload[0].lat), lon=Number(payload[0].lon);
-            if(Number.isFinite(lat) && Number.isFinite(lon)) return {lat, lon};
-          }
-          return null;
-        }
-      },
-      {
-        name: "Open-Meteo",
-        buildUrl: (query)=>`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=1&language=en`,
-        parse: (payload)=>{
-          const result = payload?.results?.[0];
-          if(result){
-            const lat=Number(result.latitude), lon=Number(result.longitude);
             if(Number.isFinite(lat) && Number.isFinite(lon)) return {lat, lon};
           }
           return null;
@@ -274,6 +252,7 @@
       __id: o.__id || makeId()
     }));
     const GEOCODE_PROVIDERS = Array.isArray(CRM.GEOCODE_PROVIDERS) && CRM.GEOCODE_PROVIDERS.length ? CRM.GEOCODE_PROVIDERS : DEFAULT_GEOCODE_PROVIDERS;
+    const GEOCODE_THROTTLE_MS = typeof CRM.GEOCODE_THROTTLE_MS === "number" && CRM.GEOCODE_THROTTLE_MS>0 ? CRM.GEOCODE_THROTTLE_MS : (GEOCODE_PROVIDERS[0]?.throttleMs || 1200);
     const sampleLeads = Array.isArray(CRM.sampleLeads) && CRM.sampleLeads.length ? CRM.sampleLeads : DEFAULT_SAMPLE_LEADS;
     const sampleBuyers = Array.isArray(CRM.sampleBuyers) && CRM.sampleBuyers.length ? CRM.sampleBuyers : DEFAULT_SAMPLE_BUYERS;
 
@@ -296,6 +275,7 @@
       const [geocodeStatus, setGeocodeStatus] = useState("");
       const [bulkSelection, setBulkSelection] = useState(()=>[]);
       const geocodeCacheRef = useRef(new Map());
+      const geocodeThrottleRef = useRef({last:0});
       const selectAllRef = useRef(null);
 
       // Buyers
@@ -738,17 +718,17 @@
         }
         return count;
       },[filteredLeads, bulkSelection, bulkSelectionSet]);
-      const geocodeAvailable = (missingCount>0) || selectedNeedsGeocode || (bulkSelectedMissingCount>0);
+      const geocodeAvailable = (missingCount>0) || selectedNeedsGeocode || (bulkSelectedMissingCount>0) || (bulkSelectedCount>0);
       const geocodeButtonDisabled = geocodeBusy || !geocodeAvailable;
       const geocodeButtonLabel = geocodeBusy
         ? `Geocoding ${geocodeProgress.done}/${geocodeProgress.total}…`
         : bulkSelectedMissingCount>0
-          ? `Geocode Selected (${bulkSelectedMissingCount}${bulkSelectedCount>bulkSelectedMissingCount ? `/${bulkSelectedCount}` : ""})`
+          ? `Geocode Selected via OpenStreetMap (${bulkSelectedMissingCount}${bulkSelectedCount>bulkSelectedMissingCount ? `/${bulkSelectedCount}` : ""})`
           : missingCount>0
-            ? `Geocode Missing (${missingCount})`
+            ? `Geocode Missing via OpenStreetMap (${missingCount})`
             : selectedNeedsGeocode
-              ? "Geocode Selected Lead"
-              : "Geocode Missing (0)";
+              ? "Geocode Selected Lead via OpenStreetMap"
+              : "Geocode via OpenStreetMap";
       const allFilteredSelected = filteredLeads.length>0 && filteredSelectionCount===filteredLeads.length;
       useEffect(()=>{
         if(selectAllRef.current){
@@ -836,7 +816,20 @@
         for(const provider of GEOCODE_PROVIDERS){
           try{
             const url = provider.buildUrl(query);
+            if(typeof CRM.awaitGeocodeWindow === "function"){
+              await CRM.awaitGeocodeWindow();
+            }else{
+              const throttleMs = typeof provider.throttleMs === "number" ? provider.throttleMs : GEOCODE_THROTTLE_MS;
+              if(throttleMs>0){
+                const now = Date.now();
+                const elapsed = now - geocodeThrottleRef.current.last;
+                if(geocodeThrottleRef.current.last && elapsed < throttleMs){
+                  await sleep(throttleMs - elapsed);
+                }
+              }
+            }
             const res = await fetch(url,{headers:{'Accept':'application/json'}});
+            geocodeThrottleRef.current.last = Date.now();
             if(!res.ok) continue;
             const data = await res.json();
             const coords = provider.parse(data);
@@ -879,7 +872,7 @@
           return;
         }
         setGeocodeBusy(true);
-        setGeocodeStatus(usingSelection ? "Starting geocode for selected leads…" : "Starting geocode run…");
+        setGeocodeStatus(usingSelection ? "Starting geocode for selected leads via OpenStreetMap…" : "Starting OpenStreetMap geocode run…");
         setGeocodeProgress({done:0,total:targets.length});
         const updated=leads.slice();
         let changed=false;
@@ -916,7 +909,6 @@
             console.warn("Geocode failed for", q, e);
           }
           setGeocodeProgress({done:i+1,total:targets.length});
-          if(i<targets.length-1) await sleep(1200);
         }
         if(changed) setLeads(updated.slice());
         if(changed && successIds.length){

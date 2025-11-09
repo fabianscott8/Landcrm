@@ -5,6 +5,7 @@ const logic = require('../crm-logic.js');
 
 const {
   GEOCODE_PROVIDERS,
+  GEOCODE_THROTTLE_MS,
   cleanBuyerRecord,
   cleanLeadRecord,
   makeHistoryEntry,
@@ -14,7 +15,9 @@ const {
   sanitizeHistory,
   sampleBuyers,
   sampleLeads,
-  toNumber
+  toNumber,
+  awaitGeocodeWindow,
+  geocodeWithNominatim
 } = logic;
 
 test('sanitizeHistory normalizes primitive entries', () => {
@@ -103,16 +106,38 @@ test('toNumber strips currency characters safely', () => {
   assert.equal(toNumber(null), undefined);
 });
 
-test('geocode providers parse valid payloads', () => {
-  const osm = GEOCODE_PROVIDERS.find(p => p.name === 'OpenStreetMap');
-  const mapsCo = GEOCODE_PROVIDERS.find(p => p.name === 'Maps.co');
-  const openMeteo = GEOCODE_PROVIDERS.find(p => p.name === 'Open-Meteo');
+test('OpenStreetMap provider is configured with throttle and parsing', () => {
+  assert.equal(GEOCODE_PROVIDERS.length, 1);
+  const osm = GEOCODE_PROVIDERS[0];
+  assert.equal(osm.name, 'OpenStreetMap');
+  assert.equal(osm.throttleMs, GEOCODE_THROTTLE_MS);
   assert.deepEqual(osm.parse([{ lat: '28.9', lon: '-82.4' }]), { lat: 28.9, lon: -82.4 });
-  assert.deepEqual(mapsCo.parse([{ lat: '29.0', lon: '-81.5' }]), { lat: 29.0, lon: -81.5 });
-  assert.deepEqual(openMeteo.parse({ results: [{ latitude: '30.1', longitude: '-83.2' }] }), { lat: 30.1, lon: -83.2 });
   assert.equal(osm.parse([]), null);
-  assert.equal(mapsCo.parse(null), null);
-  assert.equal(openMeteo.parse({}), null);
+});
+
+test('awaitGeocodeWindow enforces the throttle interval', async () => {
+  await awaitGeocodeWindow(Date.now() - (GEOCODE_THROTTLE_MS + 5));
+  const before = Date.now();
+  await awaitGeocodeWindow(before);
+  const elapsed = Date.now() - before;
+  assert.ok(elapsed >= GEOCODE_THROTTLE_MS - 50, `expected >= ${GEOCODE_THROTTLE_MS - 50}ms, got ${elapsed}`);
+});
+
+test('geocodeWithNominatim fetches and parses coordinates', async () => {
+  let called = 0;
+  const fakeFetch = async (url) => {
+    called += 1;
+    assert.ok(url.startsWith('https://nominatim.openstreetmap.org/search'));
+    return {
+      ok: true,
+      async json(){
+        return [{ lat: '28.101', lon: '-82.302' }];
+      }
+    };
+  };
+  const coords = await geocodeWithNominatim('123 Sample Rd, Town, ST', fakeFetch);
+  assert.deepEqual(coords, { lat: 28.101, lon: -82.302, provider: 'OpenStreetMap' });
+  assert.equal(called, 1);
 });
 
 test('sample data hydrates into clean records', () => {
