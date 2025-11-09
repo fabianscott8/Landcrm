@@ -119,6 +119,8 @@
             Longitude: -82.4891,
             APN: "18E17S100010 01230 0120",
             Acreage: "0.24",
+            Cell: "(352) 555-0199",
+            "Email 1": "john.sample@citrusland.com",
             Status: "Contacted",
             __notes: "Seller is open to a clean cash offer with a quick close.",
             __nextAction: "Send purchase agreement draft",
@@ -142,6 +144,8 @@
             Longitude: -82.4612,
             APN: "18E17S100020 04560 0070",
             Acreage: "0.25",
+            "Phone 1": "(352) 555-0142",
+            "Email 1": "offers@acmeholdings.example",
             Status: "New",
             __notes: "Cold mailer response asking for quick valuation.",
             __nextAction: "Research comps and call back",
@@ -206,6 +210,20 @@
         ]
       };
     })();
+    const PHONE_FIELDS = [
+      "Cell","Cell 2","Cell 3","Landline","Landline 2","Landline 3","Landline 4",
+      "Phone","Phone 1","Phone 2","Phone 3","Other Phone","Primary Phone","Secondary Phone"
+    ];
+    const EMAIL_FIELDS = ["Email","Email 1","Email 2","Email 3","Primary Email","Secondary Email"];
+    const leadHasCoordinates = (lead)=> Number.isFinite(lead?.Latitude) && Number.isFinite(lead?.Longitude);
+    const normalizePhoneHref = (value)=>{
+      const digits = String(value ?? "").replace(/[^0-9+]/g,"");
+      if(!digits) return "";
+      if(digits.startsWith("+")) return digits;
+      if(digits.length===11 && digits.startsWith("1")) return `+${digits}`;
+      if(digits.length===10) return `+1${digits}`;
+      return digits;
+    };
     const sanitizeHistory = typeof CRM.sanitizeHistory === "function" ? CRM.sanitizeHistory : ((list)=>{
       if(!Array.isArray(list)) return [];
       return list.map(entry=>{
@@ -453,6 +471,7 @@
       },[filteredLeads.length, selectedIndexSafe]);
       const selectedLead = selectedIndexSafe>=0 ? filteredLeads[selectedIndexSafe] : null;
       const selectedLeadId = selectedLead?.__id;
+      const selectedNeedsGeocode = selectedLead ? !leadHasCoordinates(selectedLead) : false;
       useEffect(()=>{ setLeadLogText(""); setLeadLogType("Note"); },[selectedLeadId]);
 
       const assignedBuyer = useMemo(()=> selectedLead ? buyers.find(b=>b.__id===selectedLead.__assignedBuyerId) || null : null, [buyers, selectedLead]);
@@ -471,6 +490,37 @@
           return countyOK && acresOK && priceOK;
         });
       },[buyers, selectedLead]);
+      const selectedLeadPhones = useMemo(()=>{
+        if(!selectedLead) return [];
+        const seen = new Set();
+        const entries = [];
+        for(const field of PHONE_FIELDS){
+          const raw = selectedLead[field];
+          const display = typeof raw === "number" ? String(raw) : String(raw ?? "").trim();
+          if(!display) continue;
+          const href = normalizePhoneHref(display);
+          if(!href) continue;
+          if(seen.has(href)) continue;
+          seen.add(href);
+          entries.push({label: field, display, href});
+        }
+        return entries;
+      },[selectedLead]);
+      const selectedLeadEmails = useMemo(()=>{
+        if(!selectedLead) return [];
+        const seen = new Set();
+        const entries = [];
+        for(const field of EMAIL_FIELDS){
+          const raw = selectedLead[field];
+          const value = typeof raw === "string" ? raw.trim() : String(raw ?? "").trim();
+          if(!value) continue;
+          const key = value.toLowerCase();
+          if(seen.has(key)) continue;
+          seen.add(key);
+          entries.push({label: field, value});
+        }
+        return entries;
+      },[selectedLead]);
 
       // Map URL
       const mapURL = React.useMemo(()=>{
@@ -618,7 +668,7 @@
       },[leads,selectedLead,compRadius]);
 
       // Geocode
-      const missingCount = useMemo(()=> leads.filter(l => typeof l?.Latitude!=='number' || typeof l?.Longitude!=='number').length, [leads]);
+      const missingCount = useMemo(()=> leads.filter(l => !leadHasCoordinates(l)).length, [leads]);
       const buildQueryFromLead = (l)=>{
         if(!l) return "";
         const siteCity = l["City"] || l["Site City"];
@@ -662,7 +712,11 @@
       }
       async function geocodeMissing(){
         if(geocodeBusy) return;
-        const targets = leads.map((l,idx)=>({l,idx})).filter(x=> typeof x.l?.Latitude!=='number' || typeof x.l?.Longitude!=='number');
+        let targets = leads.map((l,idx)=>({l,idx})).filter(x=> !leadHasCoordinates(x.l));
+        if(!targets.length && selectedNeedsGeocode && selectedLeadId){
+          const idx = leads.findIndex(l=>l.__id===selectedLeadId);
+          if(idx!==-1) targets = [{l:leads[idx], idx}];
+        }
         if(!targets.length){
           setGeocodeStatus("All leads already have coordinates.");
           return;
@@ -742,8 +796,14 @@
                 </select>
                 <button className="btn brand" onClick={()=>exportCSV(leads,"Wholesale_Land_Leads.csv")}>Export CSV</button>
                 <button className="btn ghost" onClick={()=>{const sample=sampleLeads.map(cleanLeadRecord); setLeads(sample); setSelectedIndex(0);}}>Load Sample</button>
-                <button className="btn" disabled={geocodeBusy||missingCount===0} onClick={geocodeMissing}>
-                  {geocodeBusy? `Geocoding ${geocodeProgress.done}/${geocodeProgress.total}…` : `Geocode Missing (${missingCount})`}
+                <button className="btn" disabled={geocodeBusy || (!missingCount && !selectedNeedsGeocode)} onClick={geocodeMissing}>
+                  {geocodeBusy
+                    ? `Geocoding ${geocodeProgress.done}/${geocodeProgress.total}…`
+                    : missingCount
+                      ? `Geocode Missing (${missingCount})`
+                      : selectedNeedsGeocode
+                        ? "Geocode Selected Lead"
+                        : "Geocode Missing (0)"}
                 </button>
               </div>
               {geocodeStatus && (
@@ -805,6 +865,44 @@
                           <Info label="Est. Value" value={selectedLead?.["Estimated Market Value"]} />
                           <Info label="Latitude" value={String(selectedLead?.["Latitude"] ?? "")} />
                           <Info label="Longitude" value={String(selectedLead?.["Longitude"] ?? "")} />
+                        </div>
+
+                        <div style={{borderTop:"1px solid var(--line)", paddingTop:"12px", marginBottom:"16px"}}>
+                          <div style={{fontWeight:600, marginBottom:"8px"}}>📞 Contact Details</div>
+                          <div style={{display:"grid", gap:"12px", gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))"}}>
+                            <div>
+                              <div className="muted" style={{fontSize:"11px", textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:"6px"}}>Phone</div>
+                              {selectedLeadPhones.length ? (
+                                <div style={{display:"flex", flexDirection:"column", gap:"6px"}}>
+                                  {selectedLeadPhones.map(phone=>(
+                                    <a key={`${phone.label}-${phone.href}`} className="btn ghost" href={`tel:${phone.href}`}
+                                      style={{textDecoration:"none", display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+                                      <span>{phone.display}</span>
+                                      <span className="muted" style={{fontSize:"11px"}}>{phone.label}</span>
+                                    </a>
+                                  ))}
+                                </div>
+                              ) : (
+                                <div className="muted small">No phone numbers yet.</div>
+                              )}
+                            </div>
+                            <div>
+                              <div className="muted" style={{fontSize:"11px", textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:"6px"}}>Email</div>
+                              {selectedLeadEmails.length ? (
+                                <div style={{display:"flex", flexDirection:"column", gap:"6px"}}>
+                                  {selectedLeadEmails.map(email=>(
+                                    <a key={`${email.label}-${email.value}`} className="btn ghost" href={`mailto:${encodeURIComponent(email.value)}`}
+                                      style={{textDecoration:"none", display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+                                      <span>{email.value}</span>
+                                      <span className="muted" style={{fontSize:"11px"}}>{email.label}</span>
+                                    </a>
+                                  ))}
+                                </div>
+                              ) : (
+                                <div className="muted small">No emails yet.</div>
+                              )}
+                            </div>
+                          </div>
                         </div>
 
                         <div style={{borderTop:"1px solid var(--line)", paddingTop:"12px"}}>
