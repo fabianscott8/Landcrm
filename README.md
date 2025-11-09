@@ -7,13 +7,3 @@ This project is a static, browser-based CRM prototype. To see the live preview:
 3. Use the **Load Sample** buttons (top-right of each tab) if you ever clear the data and want to restore the preview dataset.
 
 All changes you make in the UI persist automatically in `localStorage`.
-
-## Testing
-
-Run the Node.js test suite to exercise the shared CRM helpers:
-
-```bash
-npm test
-```
-
-The project has no external dependencies; Node 18+ is sufficient to execute the tests.
