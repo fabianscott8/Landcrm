@@ -19,7 +19,8 @@ const {
   sampleLeads,
   toNumber,
   awaitGeocodeWindow,
-  geocodeWithNominatim
+  geocodeWithNominatim,
+  applyGeocodeResult
 } = logic;
 
 test('sanitizeHistory normalizes primitive entries', () => {
@@ -157,6 +158,24 @@ test('geocodeWithNominatim filters placeholder coordinates', async () => {
   });
   const coords = await geocodeWithNominatim('Any query', fakeFetch);
   assert.equal(coords, null);
+});
+
+test('applyGeocodeResult updates coordinates and logs provider', () => {
+  const lead = cleanLeadRecord({
+    __id: 'lead-geo',
+    Latitude: '',
+    Longitude: '',
+    __history: [makeHistoryEntry('Note', 'Original')]
+  });
+  const updated = applyGeocodeResult(lead, { lat: '28.501', lon: '-82.401', provider: 'OpenStreetMap' });
+  assert.notEqual(updated, lead);
+  assert.equal(updated.Latitude, 28.501);
+  assert.equal(updated.Longitude, -82.401);
+  assert.ok(Array.isArray(updated.__history));
+  assert.equal(updated.__history[0].type, 'Status');
+  assert.equal(updated.__history[0].note, 'Coordinates verified via OpenStreetMap');
+  const repeated = applyGeocodeResult(updated, { lat: 28.501, lon: -82.401, provider: 'OpenStreetMap' });
+  assert.equal(repeated, updated);
 });
 
 test('sample data hydrates into clean records', () => {

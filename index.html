@@ -276,6 +276,39 @@
       __history: sanitizeHistory(o.__history),
       __id: o.__id || makeId()
     }));
+    const applyGeocodeResult = typeof CRM.applyGeocodeResult === "function"
+      ? CRM.applyGeocodeResult
+      : ((lead, coords={})=>{
+          if(!lead || typeof lead !== "object") return lead;
+          const lat = normalizeLatitude(coords.lat ?? coords.Latitude ?? coords.latitude);
+          const lon = normalizeLongitude(coords.lon ?? coords.lng ?? coords.Longitude ?? coords.longitude);
+          if(!coordinatesLookValid(lat, lon)) return lead;
+          const existingLat = normalizeLatitude(lead.Latitude);
+          const existingLon = normalizeLongitude(lead.Longitude);
+          const provider = coords.provider || coords.source || null;
+          const next = {...lead};
+          let changed = false;
+          if(existingLat !== lat || typeof next.Latitude !== "number"){
+            next.Latitude = lat;
+            changed = true;
+          }
+          if(existingLon !== lon || typeof next.Longitude !== "number"){
+            next.Longitude = lon;
+            changed = true;
+          }
+          if(provider){
+            const note = `Coordinates verified via ${provider}`;
+            const history = Array.isArray(lead.__history) ? lead.__history : [];
+            const alreadyLogged = history.length && history[0] && history[0].type === "Status" && history[0].note === note;
+            if(!alreadyLogged){
+              const historyClone = history.slice();
+              historyClone.unshift(makeHistoryEntry("Status", note));
+              next.__history = historyClone;
+              changed = true;
+            }
+          }
+          return changed ? next : lead;
+        });
     const GEOCODE_PROVIDERS = Array.isArray(CRM.GEOCODE_PROVIDERS) && CRM.GEOCODE_PROVIDERS.length ? CRM.GEOCODE_PROVIDERS : DEFAULT_GEOCODE_PROVIDERS;
     const GEOCODE_THROTTLE_MS = typeof CRM.GEOCODE_THROTTLE_MS === "number" && CRM.GEOCODE_THROTTLE_MS>0 ? CRM.GEOCODE_THROTTLE_MS : (GEOCODE_PROVIDERS[0]?.throttleMs || 1200);
     const sampleLeads = Array.isArray(CRM.sampleLeads) && CRM.sampleLeads.length ? CRM.sampleLeads : DEFAULT_SAMPLE_LEADS;
@@ -903,11 +936,9 @@
         setGeocodeBusy(true);
         setGeocodeStatus(usingSelection ? "Starting geocode for selected leads via OpenStreetMap…" : "Starting OpenStreetMap geocode run…");
         setGeocodeProgress({done:0,total:targets.length});
-        const updated=leads.slice();
-        let changed=false;
         let successCount=0, failCount=0, skippedCount=0;
         let lastProvider="";
-        const successIds=[];
+        const successes=[];
         for(let i=0;i<targets.length;i++){
           const {l,idx}=targets[i];
           const q=buildQueryFromLead(l);
@@ -923,10 +954,8 @@
               const lat = normalizeLatitude(coords.lat ?? coords.latitude);
               const lon = normalizeLongitude(coords.lon ?? coords.lng ?? coords.longitude);
               if(coordinatesLookValid(lat, lon)){
-                updated[idx]={...updated[idx], Latitude:lat, Longitude:lon};
-                changed=true;
+                successes.push({id: l.__id, lat, lon, provider: coords.provider || lastProvider || ""});
                 successCount++;
-                successIds.push(updated[idx].__id);
               }else{
                 failCount++;
               }
@@ -939,8 +968,20 @@
           }
           setGeocodeProgress({done:i+1,total:targets.length});
         }
-        if(changed) setLeads(updated.slice());
-        if(changed && successIds.length){
+        if(successes.length){
+          const byId = new Map(successes.map(item=>[item.id, item]));
+          setLeads(prev=>{
+            let mutated=false;
+            const next = prev.map(lead=>{
+              const update = byId.get(lead.__id);
+              if(!update) return lead;
+              const applied = applyGeocodeResult(lead, update);
+              if(applied !== lead) mutated = true;
+              return applied;
+            });
+            return mutated ? next : prev;
+          });
+          const successIds = successes.map(item=>item.id);
           setBulkSelection(prev=>{
             const next = new Set(prev);
             let mutated=false;

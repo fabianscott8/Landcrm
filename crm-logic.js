@@ -109,6 +109,39 @@
     if(apn) return apn;
     return String(l["Owner Name"]||'').trim();
   };
+  function applyGeocodeResult(lead, coords){
+    if(!lead || typeof lead !== 'object') return lead;
+    const latCandidate = coords && (coords.lat ?? coords.Latitude ?? coords.latitude);
+    const lonCandidate = coords && (coords.lon ?? coords.lng ?? coords.Longitude ?? coords.longitude);
+    const lat = normalizeLatitude(latCandidate);
+    const lon = normalizeLongitude(lonCandidate);
+    if(!coordinatesLookValid(lat, lon)) return lead;
+    const existingLat = normalizeLatitude(lead.Latitude);
+    const existingLon = normalizeLongitude(lead.Longitude);
+    const provider = coords && (coords.provider || coords.source || null);
+    const next = {...lead};
+    let changed = false;
+    if(existingLat !== lat || typeof next.Latitude !== 'number'){
+      next.Latitude = lat;
+      changed = true;
+    }
+    if(existingLon !== lon || typeof next.Longitude !== 'number'){
+      next.Longitude = lon;
+      changed = true;
+    }
+    if(provider){
+      const note = `Coordinates verified via ${provider}`;
+      const history = Array.isArray(lead.__history) ? lead.__history : [];
+      const alreadyLogged = history.length && history[0] && history[0].type === "Status" && history[0].note === note;
+      if(!alreadyLogged){
+        const historyClone = history.slice();
+        historyClone.unshift(makeHistoryEntry("Status", note));
+        next.__history = historyClone;
+        changed = true;
+      }
+    }
+    return changed ? next : lead;
+  }
   function sanitizeHistory(list){
     if(!Array.isArray(list)) return [];
     return list.map(entry=>{
@@ -272,6 +305,7 @@
     normalizeCoordinate,
     normalizeLatitude,
     normalizeLongitude,
+    applyGeocodeResult,
     leadHasCoordinates,
     buildGeocodeQuery,
     GEOCODE_THROTTLE_MS,
