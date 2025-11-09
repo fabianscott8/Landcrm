@@ -228,11 +228,13 @@
       const n = Number(raw);
       return Number.isFinite(n) ? n : undefined;
     });
-    const cleanLeadRecord = typeof CRM.cleanLeadRecord === "function" ? CRM.cleanLeadRecord : ((o={})=>({
-      ...o,
-      __history: sanitizeHistory(o.__history),
-      __id: o.__id || makeId()
-    }));
+	const cleanLeadRecord = typeof CRM.cleanLeadRecord === "function" ? CRM.cleanLeadRecord : ((o={})=>({
+	  ...o,
+	  __history: sanitizeHistory(o.__history),
+	  __id: o.__id || makeId(),
+	  Latitude: toNumber(o["Latitude"]),
+	  Longitude: toNumber(o["Longitude"])
+	}));
     const cleanBuyerRecord = typeof CRM.cleanBuyerRecord === "function" ? CRM.cleanBuyerRecord : ((o={})=>({
       ...o,
       __history: sanitizeHistory(o.__history),
