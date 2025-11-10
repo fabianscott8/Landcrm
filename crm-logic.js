@@ -17,13 +17,18 @@
       }
     }
   ];
-  let lastGeocodeAt = 0;
+  let nextGeocodeAt = 0;
+  function resetGeocodeThrottle(){
+    nextGeocodeAt = 0;
+  }
   async function awaitGeocodeWindow(now = Date.now()){
-    const elapsed = now - lastGeocodeAt;
-    if(lastGeocodeAt && elapsed < GEOCODE_THROTTLE_MS){
-      await sleep(GEOCODE_THROTTLE_MS - elapsed);
+    const reference = Number.isFinite(now) ? now : Date.now();
+    const scheduledAt = reference < nextGeocodeAt ? nextGeocodeAt : reference;
+    nextGeocodeAt = scheduledAt + GEOCODE_THROTTLE_MS;
+    const wait = scheduledAt - reference;
+    if(wait > 0){
+      await sleep(wait);
     }
-    lastGeocodeAt = Date.now();
   }
   async function geocodeWithNominatim(query, fetchImpl){
     if(!query || typeof fetchImpl !== "function") return null;
@@ -249,6 +254,7 @@
     buildGeocodeQuery,
     GEOCODE_THROTTLE_MS,
     awaitGeocodeWindow,
+    resetGeocodeThrottle,
     geocodeWithNominatim
   };
   if(typeof module !== 'undefined' && module.exports){
