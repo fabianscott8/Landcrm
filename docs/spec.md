@@ -1,48 +1,109 @@
-# Project: LandCRM (Web) — Advanced Spec
+# Project: LandCRM (Web)
 
-Goal: Build a best-in-class, local-first CRM for land wholesaling with powerful import, dedupe, buyer matching, map tools, quick communication, and rapid follow-up workflows. Coordinates logic is already fixed; this spec focuses on advanced productivity features, better list-level visibility, and scalable UX.
+Goal: Fix geocoding false-positive (“Selected leads already have coordinates”) and implement UX upgrades that make daily wholesaling faster and clearer.
 
----
+## Current Problem
+- Geocode button often shows “Selected leads already have coordinates” when many selected rows **do not** have valid Latitude/Longitude.
+- Root cause: loose truthiness checks on `Latitude/Longitude` treating "—", `""`, `"0"`, or strings as "has value". Also coords are often stored as strings.
 
-## 1) Import System (CSV + XLSX)
+## Required Fix (Must)
+1) **Numeric normalization on import**
+   - When parsing CSV, coerce `Latitude`/`Longitude` into numbers.
+   - Create helpers:
+     ```js
+     const asNumber = (v) => {
+       if (v === null || v === undefined) return undefined;
+       const s = String(v).trim();
+       if (!s || s === "—" || s.toLowerCase() === "na" || s.toLowerCase() === "null") return undefined;
+       const n = Number(s);
+       return Number.isFinite(n) ? n : undefined;
+     };
 
-### Overview
-The system must import data from **multiple sources**, including `.csv` and `.xlsx` files, even if their **headers differ significantly** (e.g., “Owner Name” vs. “owner_fullname”, or “APN” vs. “Parcel Number”).  
-Codex must implement a **header normalization + mapping layer** that:
-- Detects and unifies equivalent fields from different file structures.  
-- Remembers previous mappings for reuse.  
-- Automatically organizes imported data into easy-to-read, consistent categories inside the CRM UI.
+     const hasCoords = (obj) => {
+       const lat = asNumber(obj.Latitude ?? obj.lat ?? obj.latitude);
+       const lon = asNumber(obj.Longitude ?? obj.lon ?? obj.longitude);
+       return Number.isFinite(lat) && Number.isFinite(lon);
+     };
 
----
+     const needsCoords = (obj) => !hasCoords(obj);
+     ```
+   - Apply during CSV mapping:
+     ```js
+     lead.Latitude  = asNumber(row.Latitude ?? row.lat ?? row.latitude);
+     lead.Longitude = asNumber(row.Longitude ?? row.lon ?? row.longitude);
+     ```
+   - Also strip “—” for text fields used for queries: `"Owner Name"`, `County`, `"Site Address"`.
 
-### 1.1 Header Mapping & Schema Intelligence  ✅ (NEW)
-**Problem:** Uploaded spreadsheets from different providers have inconsistent column names and layouts.  
-**Goal:** Automatically map all possible variations into a common internal schema.
+2) **Target selection for geocoding**
+   - Replace current target algorithm with:
+     ```js
+     const computeGeocodeTargets = (leads, selectedIds) => {
+       const base = selectedIds?.size ? leads.filter(l => selectedIds.has(l.__id)) : leads;
+       return base.map((l, idx) => ({ l, idx })).filter(({ l }) => needsCoords(l));
+     };
+     ```
+   - Button logic:
+     - When selection exists: label `Geocode Selected (N)` where `N = selectedMissingCount`.
+     - When no selection: label `Geocode Missing (M)` where `M = total missing`.
+     - Disable button only when count === 0 or a geocode job is in-progress.
 
-#### Expected Behavior
-- When importing a file, Codex should:
-  1. Read the first row (headers) and infer the mapping to internal field names.
-  2. If new or unknown headers appear, show a *mapping suggestion* screen where the user can confirm or reassign them.
-  3. Save that mapping in `localStorage` keyed by filename pattern (e.g., `landcrm:mapping:<filename>`).
-  4. On subsequent imports, apply the stored mapping automatically.
+3) **Geocode loop**
+   - Keep Nominatim throttle to **1200ms**/request.
+   - Query = `"Site Address, County"` if address exists; else fall back to APN.
+   - On success, store **numbers** in `Latitude/Longitude`, update state immediately for progressive progress display.
 
-#### Example:
-| Raw Header             | Mapped To (Internal Field)    |
-|------------------------|-------------------------------|
-| Owner Name             | Owner Name                    |
-| owner_fullname         | Owner Name                    |
-| site_address           | Site Address                  |
-| property_address       | Site Address                  |
-| apn / parcel_number    | APN                           |
-| est_value / price      | Estimated Market Value         |
-| acres / acreage        | Acreage                        |
-| latitude / lat         | Latitude                       |
-| longitude / lon        | Longitude                      |
-| phone / cell / mobile  | Cell                           |
-| dnc / do_not_call      | DNC                            |
-| email / e_mail         | Email                          |
+## UX Upgrades (Should)
+1) **Collapsible panels** using native `<details>`/`<summary>`:
+   - Panels: “Map & Details” (open), “Contact Details”, “Communication History”, “Nearby Comps”.
+2) **Multi‐phone & multi‐email rendering with DNC badges**
+   - Known phone columns: `["Cell","Cell 2","Landline","Landline 2","Phone 1","Phone 2"]`
+   - Known DNC columns: `["DNC","DNC 2","DNC 3","DNC 4"]`
+   - For each non-empty phone, show: number + badges `[Primary]` `[DNC]` + actions (Call, Text, Copy).
+3) **Communication history**
+   - Per-lead `__log` array; prepend entries. Guard: `Array.isArray(lead.__log) ? lead.__log : []`.
+   - Quick type dropdown: Call/Text/Email/Note + notes + “Next action date” (optional).
+4) **Buyer matching (MVP)**
+   - On Buyers tab, add a button “Match To Selected Lead”: show buyers whose county list contains the lead’s county AND acreage overlaps their min/max.
 
-#### Implementation Notes
-- Codex must include a normalization function:
-  ```js
-  const normalizeHeader = (h) => String(h||"").trim().toLowerCase().replace(/[_-]+/g, " ").trim();
+## Files & Places to Edit
+- `app.jsx` (or `crm-logic.js` depending on current repo):
+  - Add helpers `asNumber`, `hasCoords`, `needsCoords`, `computeGeocodeTargets`.
+  - Apply normalization during CSV import mapping.
+  - Replace geocode button state/label code with count-aware variant.
+  - Replace geocode handler to use `computeGeocodeTargets`.
+  - Wrap detail sections with `<details>` blocks.
+  - Add `extractPhones` util:
+    ```js
+    const phoneFields = ["Cell","Cell 2","Landline","Landline 2","Phone 1","Phone 2"];
+    const dncFields   = ["DNC","DNC 2","DNC 3","DNC 4"];
+    const extractPhones = (lead) => {
+      const dncs = new Set(dncFields.filter(f => String(lead[f] ?? "").trim().toLowerCase() === "yes"));
+      return phoneFields
+        .map(f => ({ label: f, value: String(lead[f] ?? "").trim() }))
+        .filter(p => p.value)
+        .map(p => ({
+          ...p,
+          isDNC: dncs.size > 0 && [...dncs].some(() => true), // simple flag if any DNC true (label-based matching may be dataset-specific)
+        }));
+    };
+    ```
+  - Render phones with badges + actions (tel:, sms:, copy).
+- Ensure LocalStorage persistence remains unchanged.
+
+## Acceptance Tests
+- Import CSV with missing coords; geocode button shows `Geocode Missing (>0)`.
+- Select a mixed set; button shows `Geocode Selected (count of missing among selection)`.
+- Click geocode; progress increments, map updates, state persists on refresh.
+- Phone list shows every non-empty phone; DNC shows a red badge; call/text/copy work.
+- Collapsible panels reduce vertical clutter; “Map & Details” open by default.
+- Buyers “Match To Selected Lead” filters correctly.
+
+## Non-Goals (for this PR)
+- No server-side persistence.
+- No third-party paid geocode service.
+- No re-styling beyond light tweaks (retain current Tailwind-ish utilities if present).
+
+## Definition of Done
+- All acceptance tests pass manually.
+- No console errors.
+- Geocode false positives eliminated (verified by CSV with blanks and “—”).

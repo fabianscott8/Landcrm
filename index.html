@@ -53,6 +53,15 @@
     .contact-item{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#fff}
     .contact-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
     .contact-actions a,.contact-actions button{font-size:12px;padding:6px 10px}
+    .modal-backdrop{position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;padding:24px;z-index:1000}
+    .modal{background:#fff;border-radius:16px;max-width:440px;width:100%;box-shadow:0 30px 60px rgba(15,23,42,.25);border:1px solid var(--line);overflow:hidden}
+    .modal header{padding:16px 20px;font-weight:600;border-bottom:1px solid var(--line)}
+    .modal-body{padding:20px}
+    .modal-footer{padding:16px 20px;border-top:1px solid var(--line);display:flex;justify-content:flex-end;gap:12px}
+    .count-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:12px;margin-bottom:16px}
+    .count-card{border:1px solid var(--line);border-radius:12px;padding:12px;background:#f8fafc;text-align:center}
+    .count-card .label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px}
+    .count-card .value{font-size:20px;font-weight:700;color:var(--ink)}
   </style>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -61,6 +70,7 @@
 <body>
   <div class="container"><div id="root"></div></div>
 
+  <script crossorigin src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="crm-logic.js"></script>
   <script type="text/babel">
     const {useEffect, useMemo, useRef, useState} = React;
@@ -480,9 +490,11 @@
       const [geocodeProgress, setGeocodeProgress] = useState({done:0,total:0});
       const [geocodeStatus, setGeocodeStatus] = useState("");
       const [bulkSelection, setBulkSelection] = useState(()=>[]);
+      const [importPreview, setImportPreview] = useState(null);
       const geocodeCacheRef = useRef(new Map());
       const geocodeThrottleRef = useRef({last:0});
       const selectAllRef = useRef(null);
+      const leadsRef = useRef(leads);
 
       // Buyers
       const [buyers, setBuyers] = useState(()=>{
@@ -546,6 +558,7 @@
           console.warn("Failed to persist leads", err);
         }
       },[leads]);
+      useEffect(()=>{ leadsRef.current = leads; },[leads]);
       useEffect(()=>{
         try{
           if(typeof localStorage !== "undefined"){
@@ -571,106 +584,320 @@
         });
       },[leads]);
 
-      // CSV
-      function parseCSV(text){
-        const rows=[]; let cur=[], val="", inQ=false;
-        const endVal=()=>{cur.push(val);val="";}; const endRow=()=>{rows.push(cur);cur=[];};
-        for(let i=0;i<text.length;i++){
-          const c=text[i];
-          if(inQ){
-            if(c==='\"'){ if(text[i+1]==='\"'){val+='\"';i++;} else {inQ=false;} }
-            else { val+=c; }
-          }else{
-            if(c==='\"'){ inQ=true; }
-            else if(c===',') endVal();
-            else if(c==='\n'){ endVal(); endRow(); }
-            else if(c==='\r'){ /* ignore */ }
-            else { val+=c; }
-          }
-        }
-        endVal(); if(cur.length) endRow();
-        while(rows.length && rows[rows.length-1].every(x=>x==="")) rows.pop();
-        return rows;
-      }
+      // Import + merge helpers
+      const HEADER_ALIAS_ENTRIES = [
+        ['owner 1 full name','Owner Name'],['owner 1 first name','Owner Name'],['owner 1 last name','Owner Name'],['owner name','Owner Name'],['owner','Owner Name'],['owner full name','Owner Name'],['owner first name','Owner Name'],['owner last name','Owner Name'],
+        ['apn','APN'],['assessor parcel number (apn)','APN'],['parcel number','APN'],['parcel id','APN'],
+        ['property address','Site Address'],['situs address','Site Address'],['situs street name','Site Address'],['situs house number','Site Address'],['site address','Site Address'],['address','Site Address'],
+        ['mailing address','Mail Street Address'],['mail street address','Mail Street Address'],['mailing street','Mail Street Address'],['mail street','Mail Street Address'],
+        ['mailing city','Mail City'],['mail city','Mail City'],['mailing state','Mail State'],['mail state','Mail State'],['mailing zip','Mail Zip'],['mail zip','Mail Zip'],
+        ['situs city','Site City'],['site city','Site City'],['situs state','Site State'],['site state','Site State'],['situs zip','Site Zip'],['site zip','Site Zip'],
+        ['county','County'],['property county','County'],['site county','County'],
+        ['lot acreage','Acreage'],['lot acres','Acreage'],['lot size (acres)','Acreage'],['acreage','Acreage'],
+        ['latitude','Latitude'],['lat','Latitude'],['longitude','Longitude'],['lon','Longitude'],['lng','Longitude'],
+        ['email','Email'],['email 1','Email 1'],['email 2','Email 2'],['email 3','Email 3'],
+        ['phone','Phone 1'],['phone 1','Phone 1'],['phone 2','Phone 2'],['phone 3','Phone 3'],
+        ['cell','Cell'],['cell 2','Cell 2'],['cell 3','Cell 3'],['landline','Landline'],['landline 2','Landline 2'],['landline 3','Landline 3'],['landline 4','Landline 4'],
+        ['dnc','DNC'],['dnc 2','DNC 2'],['dnc 3','DNC 3'],['dnc 4','DNC 4'],
+        ['estimated value','Estimated Market Value'],['est. value','Estimated Market Value'],['est value','Estimated Market Value'],['estimated market value','Estimated Market Value'],
+        ['status','Status'],['type','Type'],['company name','Company Name'],['first name','First Name'],['last name','Last Name'],
+        ['buyer name / company','Buyer Name / Company'],['buyer name company','Buyer Name / Company']
+      ];
+      const slugifyHeader = (value)=>String(value??'').toLowerCase().replace(/[^a-z0-9]/g,'');
+      const HEADER_ALIAS_MAP = HEADER_ALIAS_ENTRIES.reduce((acc,[alias,label])=>{ acc[slugifyHeader(alias)]=label; return acc; },{});
+      const humanizeHeader = (value)=>{
+        const spaced=String(value??'').replace(/_/g,' ').replace(/\s+/g,' ').trim();
+        if(!spaced) return '';
+        return spaced.split(' ').map(token=>{
+          if(token === '-') return token;
+          if(token.length<=3) return token.toUpperCase();
+          const lower=token.toLowerCase();
+          return lower.charAt(0).toUpperCase()+lower.slice(1);
+        }).join(' ');
+      };
+      const canonicalHeader = (raw)=>{
+        const trimmed=String(raw??'').trim();
+        if(!trimmed) return '';
+        const slug=slugifyHeader(trimmed);
+        if(!slug) return humanizeHeader(trimmed);
+        if(HEADER_ALIAS_MAP[slug]) return HEADER_ALIAS_MAP[slug];
+        if(slug === 'lat' || slug.endsWith('latitude')) return 'Latitude';
+        if(slug === 'lon' || slug === 'lng' || slug.endsWith('longitude')) return 'Longitude';
+        if(slug.includes('apn') || slug.includes('parcel')) return 'APN';
+        if(slug.includes('mailcity')) return 'Mail City';
+        if(slug.includes('mailstate')) return 'Mail State';
+        if(slug.includes('mailzip')) return 'Mail Zip';
+        if(slug.includes('sitecity')) return 'Site City';
+        if(slug.includes('sitestate')) return 'Site State';
+        if(slug.includes('sitezip')) return 'Site Zip';
+        return humanizeHeader(trimmed);
+      };
       function normalizeHeaders(headers){
-        const map = {
-          "owner 1 full name":"Owner Name","owner 1 first name":"Owner Name","owner name":"Owner Name",owner:"Owner Name",
-          county:"County","property county":"County","situs city":"Site City","situs state":"Site State","situs zip":"Site Zip",
-          "situs house number":"Site Address","situs street name":"Site Address","property address":"Site Address",address:"Site Address",
-          apn:"APN","assessor parcel number (apn)":"APN","lot acreage":"Acreage",acreage:"Acreage",latitude:"Latitude",longitude:"Longitude",
-          "estimated value":"Estimated Market Value","est. value":"Estimated Market Value","estimated market value":"Estimated Market Value",
-          phone:"Phone 1","phone 1":"Phone 1","phone 2":"Phone 2",email:"Email",
-          "first name":"First Name","last name":"Last Name","company name":"Company Name","street address":"Street Address",
-          city:"City",state:"State",zip:"Zip","mail street address":"Mail Street Address","mail city":"Mail City","mail state":"Mail State","mail zip":"Mail Zip",
-          cell:"Cell","cell 2":"Cell 2","cell 3":"Cell 3",landline:"Landline","landline 2":"Landline 2","landline 3":"Landline 3","landline 4":"Landline 4",
-          "email 1":"Email 1","email 2":"Email 2","email 3":"Email 3","dnc":"DNC","dnc 2":"DNC 2","dnc 3":"DNC 3","dnc 4":"DNC 4",
-          status:"Status",type:"Type","lot acres":"Acreage","lot size (acres)":"Acreage"
-        };
         const seen={};
-        return headers.map(hRaw=>{
-          const h=String(hRaw||"").trim();
-          const norm = map[h.toLowerCase()] || h;
-          if (seen[norm]==null){ seen[norm]=0; return norm; }
-          seen[norm]+=1; return `${norm} (${seen[norm]})`;
+        return headers.map(raw=>{
+          const label=canonicalHeader(raw);
+          if(!label) return '';
+          if(seen[label]==null){ seen[label]=0; return label; }
+          seen[label]+=1; return `${label} (${seen[label]})`;
         });
       }
+      const rowIsEmpty = (row)=>{
+        if(!row || !row.length) return true;
+        return row.every(cell=>{
+          if(cell === null || cell === undefined) return true;
+          if(typeof cell === 'number') return false;
+          return stripPlaceholderText(cell) === '';
+        });
+      };
       function rowsToObjects(rows){
-        if(!rows.length) return [];
-        const headers = normalizeHeaders(rows[0]);
-        const out = [];
+        if(!Array.isArray(rows) || !rows.length) return [];
+        const headers = normalizeHeaders(rows[0] || []);
+        const out=[];
         for(let i=1;i<rows.length;i++){
-          const r=rows[i]; if(!r || r.every(x=>String(x||"").trim()==="")) continue;
-          const o={}; for(let c=0;c<headers.length;c++) o[headers[c]]=r[c]??"";
-          if(!o["Owner Name"]){
-            const comp=(o["Company Name"]||"").trim();
-            const fn=(o["First Name"]||"").trim(), ln=(o["Last Name"]||"").trim();
-            const person=[fn,ln].filter(Boolean).join(" ");
-            o["Owner Name"] = comp && person ? `${comp} — ${person}` : (comp || person);
+          const row=rows[i];
+          if(rowIsEmpty(row)) continue;
+          const obj={};
+          for(let c=0;c<headers.length;c++){
+            const header=headers[c];
+            if(!header) continue;
+            const cell=row && c<row.length ? row[c] : '';
+            if(typeof cell === 'number') obj[header]=cell;
+            else if(cell === null || cell === undefined) obj[header]='';
+            else obj[header]=String(cell).trim();
           }
-          if(!o["Site Address"]){
-            const street=(o["Street Address"]||"").trim();
-            const city=(o["City"]||"").trim(), state=(o["State"]||"").trim(), zip=(o["Zip"]||"").trim();
-            const parts=[street,[city,state].filter(Boolean).join(", "),zip].filter(Boolean);
-            if(parts.length) o["Site Address"]=parts.join(", ");
+          if(!obj['Owner Name']){
+            const comp=String(obj['Company Name']??'').trim();
+            const fn=String(obj['First Name']??'').trim();
+            const ln=String(obj['Last Name']??'').trim();
+            const person=[fn,ln].filter(Boolean).join(' ');
+            obj['Owner Name'] = comp && person ? `${comp} — ${person}` : (comp || person);
           }
-          if(!o["County"]) o["County"]="";
-          out.push(o);
+          if(!obj['Site Address']){
+            const street=String(obj['Street Address']??'').trim();
+            const city=String(obj['City']??obj['Site City']??'').trim();
+            const state=String(obj['State']??obj['Site State']??'').trim();
+            const zip=String(obj['Zip']??obj['Site Zip']??'').trim();
+            const parts=[street,[city,state].filter(Boolean).join(', '),zip].filter(Boolean);
+            if(parts.length) obj['Site Address']=parts.join(', ');
+          }
+          if(obj['County']==null) obj['County']='';
+          out.push(obj);
         }
         return out;
       }
-      const leadKey = (o)=>`${(o["APN"]||"").toLowerCase()}|${(o["Site Address"]||"").toLowerCase()}`;
-      const dedupeAppend = (existing, incoming)=>{
-        const seen = new Set(existing.map(leadKey)); const merged=existing.slice();
-        for(const it of incoming){ const k=leadKey(it); if(!seen.has(k)){ merged.push(it); seen.add(k);} }
-        return merged;
+      const describeLead = (lead)=>{
+        if(!lead || typeof lead !== 'object') return 'Lead';
+        const owner=stripPlaceholderText(lead['Owner Name']||'');
+        const address=stripPlaceholderText(lead['Site Address']||'');
+        if(owner && address) return `${owner} — ${address}`;
+        return owner || address || stripPlaceholderText(lead.APN || '') || 'Lead';
       };
-      function handleLeadUpload(e){
-        const file=e.target.files?.[0]; if(!file) return;
-        const reader=new FileReader();
-        reader.onload=(evt)=>{
-          try{
-            const rows=parseCSV(String(evt.target.result||""));
-            const objs=rowsToObjects(rows).map(cleanLeadRecord);
-            setLeads(prev=> importMode==="replace" ? objs : dedupeAppend(prev, objs));
-            setSelectedIndex(0);
+      const leadPrimaryKey = (lead)=>{
+        if(!lead || typeof lead !== 'object') return '';
+        const apn=stripPlaceholderText(lead['APN']||'').toLowerCase();
+        const county=stripPlaceholderText(lead['County']||'').toLowerCase();
+        if(!apn || !county) return '';
+        return `${apn}|${county}`;
+      };
+      const leadFallbackKey = (lead)=>{
+        if(!lead || typeof lead !== 'object') return '';
+        const owner=stripPlaceholderText(lead['Owner Name']||'').toLowerCase();
+        const address=stripPlaceholderText(lead['Site Address']||'').toLowerCase();
+        const county=stripPlaceholderText(lead['County']||'').toLowerCase();
+        if(!owner && !address) return '';
+        return `${owner}|${address}|${county}`;
+      };
+      const isMeaningfulImportValue = (value, key)=>{
+        if(key === 'Latitude' || key === 'Longitude') return Number.isFinite(value);
+        if(value === null || value === undefined) return false;
+        if(typeof value === 'number') return Number.isFinite(value);
+        if(typeof value === 'string') return stripPlaceholderText(value) !== '';
+        if(Array.isArray(value)) return value.length>0;
+        if(typeof value === 'object') return Object.keys(value).length>0;
+        return true;
+      };
+      function cloneLeadForState(lead){
+        if(!lead || typeof lead !== 'object') return lead;
+        const history=Array.isArray(lead.__history) ? lead.__history.map(entry=>({...entry})) : [];
+        const tags=Array.isArray(lead.__tags) ? lead.__tags.slice() : undefined;
+        const clone={...lead};
+        clone.__history=history;
+        clone.__log=history;
+        if(tags) clone.__tags=tags;
+        return clone;
+      }
+      function mergeLeadRecords(current, incoming){
+        if(!current) return cloneLeadForState(incoming);
+        if(!incoming) return current;
+        let changed=false;
+        const next={...current};
+        for(const key of Object.keys(incoming)){
+          if(key === '__id') continue;
+          if(key === '__history' || key === '__log'){
+            const incomingHistory=Array.isArray(incoming[key]) ? incoming[key].map(entry=>({...entry})) : [];
+            if(incomingHistory.length && (!Array.isArray(current.__history) || !current.__history.length)){
+              next.__history=incomingHistory;
+              next.__log=incomingHistory;
+              changed=true;
+            }
+            continue;
+          }
+          const value=incoming[key];
+          if(!isMeaningfulImportValue(value, key)) continue;
+          const prepared=typeof value === 'string' ? value.trim() : value;
+          const existingValue=next[key];
+          if(key === 'Latitude' || key === 'Longitude'){
+            if(!Number.isFinite(existingValue) || existingValue !== prepared){
+              next[key]=prepared;
+              changed=true;
+            }
+            continue;
+          }
+          if(Array.isArray(prepared)){
+            const existingArray=Array.isArray(existingValue) ? existingValue : [];
+            if(existingArray.length !== prepared.length || existingArray.some((v,i)=>v!==prepared[i])){
+              next[key]=prepared.slice();
+              changed=true;
+            }
+            continue;
+          }
+          if(typeof prepared === 'object' && prepared !== null){
+            const existingJson=JSON.stringify(existingValue ?? null);
+            const incomingJson=JSON.stringify(prepared);
+            if(existingJson !== incomingJson){
+              next[key]={...prepared};
+              changed=true;
+            }
+            continue;
+          }
+          if(existingValue !== prepared){
+            next[key]=prepared;
+            changed=true;
+          }
+        }
+        return changed ? next : current;
+      }
+      function mergeLeadBatch(existing, incoming, mode='append'){
+        const baseExisting=Array.isArray(existing) ? existing : [];
+        const incomingList=Array.isArray(incoming) ? incoming : [];
+        if(mode === 'replace'){
+          const next=[];
+          let skipped=0;
+          for(const item of incomingList){
+            if(!item || typeof item !== 'object'){ skipped+=1; continue; }
+            next.push(cloneLeadForState(item));
+          }
+          const counts={new:next.length, merged:0, skipped};
+          const summary={new:next.slice(0,5).map(describeLead), merged:[], skipped:skipped ? ['Rows without usable data were skipped'] : []};
+          return {next, counts, summary, changed:true};
+        }
+        const next=baseExisting.slice();
+        const counts={new:0, merged:0, skipped:0};
+        const summary={new:[], merged:[], skipped:[]};
+        const primaryMap=new Map();
+        const fallbackMap=new Map();
+        const registerLead=(lead, idx)=>{
+          const primary=leadPrimaryKey(lead); if(primary) primaryMap.set(primary, idx);
+          const fallback=leadFallbackKey(lead); if(fallback) fallbackMap.set(fallback, idx);
+        };
+        baseExisting.forEach(registerLead);
+        let changed=false;
+        for(const item of incomingList){
+          if(!item || typeof item !== 'object'){ counts.skipped+=1; continue; }
+          const candidate=cloneLeadForState(item);
+          const primaryKey=leadPrimaryKey(candidate);
+          const fallbackKey=leadFallbackKey(candidate);
+          let targetIdx=null;
+          if(primaryKey && primaryMap.has(primaryKey)){ targetIdx=primaryMap.get(primaryKey); }
+          else if(fallbackKey && fallbackMap.has(fallbackKey)){ targetIdx=fallbackMap.get(fallbackKey); }
+          if(targetIdx!==null){
+            const merged=mergeLeadRecords(next[targetIdx], candidate);
+            if(merged !== next[targetIdx]){
+              next[targetIdx]=merged;
+              counts.merged+=1;
+              changed=true;
+              if(summary.merged.length<5) summary.merged.push(describeLead(merged));
+            }else{
+              counts.skipped+=1;
+              if(summary.skipped.length<5) summary.skipped.push(describeLead(candidate));
+            }
+          }else{
+            if(!primaryKey && !fallbackKey){
+              counts.skipped+=1;
+              if(summary.skipped.length<5) summary.skipped.push(describeLead(candidate));
+              continue;
+            }
+            next.push(candidate);
+            const newIdx=next.length-1;
+            if(primaryKey) primaryMap.set(primaryKey, newIdx);
+            if(fallbackKey) fallbackMap.set(fallbackKey, newIdx);
+            counts.new+=1;
+            changed=true;
+            if(summary.new.length<5) summary.new.push(describeLead(candidate));
+          }
+        }
+        return {next:changed ? next : baseExisting, counts, summary, changed};
+      }
+      async function readWorkbookRows(file){
+        if(!file) return [];
+        if(typeof XLSX === 'undefined') throw new Error('SheetJS library not loaded');
+        const data=await file.arrayBuffer();
+        const workbook=XLSX.read(data,{type:'array',cellDates:false});
+        const sheetName=workbook.SheetNames && workbook.SheetNames[0];
+        if(!sheetName) throw new Error('No worksheet found in file');
+        const sheet=workbook.Sheets[sheetName];
+        const rows=XLSX.utils.sheet_to_json(sheet,{header:1,defval:'',blankrows:false});
+        if(!Array.isArray(rows) || !rows.length) return [];
+        return rows.map(row=>Array.isArray(row)?row:[row]).filter((row, idx)=> idx===0 || !rowIsEmpty(row));
+      }
+      async function handleLeadUpload(e){
+        const input=e.target;
+        const file=input.files && input.files[0];
+        if(!file) return;
+        try{
+          const rows=await readWorkbookRows(file);
+          if(!rows.length) throw new Error('No rows detected in file');
+          const objects=rowsToObjects(rows).map(cleanLeadRecord);
+          if(!objects.length) throw new Error('No importable leads detected');
+          const analysis=mergeLeadBatch(leadsRef.current, objects, importMode);
+          setImportPreview({ type:'leads', fileName:file.name, mode:importMode, counts:analysis.counts, summary:analysis.summary, incoming:objects });
+        }catch(err){
+          console.error('Lead import failed', err);
+          alert('Unable to import leads: '+(err?.message || err));
+        }finally{
+          if(input) input.value='';
+        }
+      }
+      async function handleBuyerUpload(e){
+        const input=e.target;
+        const file=input.files && input.files[0];
+        if(!file) return;
+        try{
+          const rows=await readWorkbookRows(file);
+          if(!rows.length) throw new Error('No rows detected in file');
+          const objects=rowsToObjects(rows).map(cleanBuyerRecord);
+          if(!objects.length) throw new Error('No buyer records detected');
+          setBuyers(prev=> buyersImportMode==='replace' ? objects : prev.concat(objects));
+        }catch(err){
+          console.error('Buyer import failed', err);
+          alert('Unable to import buyers: '+(err?.message || err));
+        }finally{
+          if(input) input.value='';
+        }
+      }
+      const confirmImportPreview = ()=>{
+        if(!importPreview) return;
+        if(importPreview.type === 'leads'){
+          const result=mergeLeadBatch(leadsRef.current, importPreview.incoming, importPreview.mode);
+          if(result.changed){
+            setLeads(result.next);
             setBulkSelection([]);
-          }catch(err){ alert("Unable to parse leads CSV: "+err); }
-        };
-        reader.readAsText(file);
-      }
-      function handleBuyerUpload(e){
-        const file=e.target.files?.[0]; if(!file) return;
-        const reader=new FileReader();
-        reader.onload=(evt)=>{
-          try{
-            const rows=parseCSV(String(evt.target.result||""));
-            const objs=rowsToObjects(rows).map(cleanBuyerRecord);
-            setBuyers(prev=> buyersImportMode==="replace" ? objs : prev.concat(objs));
-          }catch(err){ alert("Unable to parse buyers CSV: "+err); }
-        };
-        reader.readAsText(file);
-      }
-
+            setSelectedIndex(0);
+          }
+        }
+        setImportPreview(null);
+      };
+      const cancelImportPreview = ()=> setImportPreview(null);
       // Derived
       const filteredLeads = React.useMemo(()=>{
         let list=leads;
@@ -1183,6 +1410,14 @@
         setGeocodeStatus(pieces.join(" "));
       }
 
+      const actionableImportCount = importPreview ? Number(importPreview.counts?.new || 0) + Number(importPreview.counts?.merged || 0) : 0;
+      const importSkippedCount = importPreview ? Number(importPreview.counts?.skipped || 0) : 0;
+      const importSummarySections = importPreview ? [
+        {label:'New leads', items: importPreview.summary?.new || []},
+        {label:'Updated leads', items: importPreview.summary?.merged || []},
+        {label:'Skipped rows', items: importPreview.summary?.skipped || []}
+      ].filter(section => Array.isArray(section.items) && section.items.length) : [];
+
       // UI
       return (
         <>
@@ -1196,7 +1431,7 @@
           {tab==="leads" ? (
             <>
               <div className="row mb-16">
-                <input type="file" accept=".csv" onChange={handleLeadUpload} className="w-72"/>
+                <input type="file" accept=".csv,.xlsx,.xls" onChange={handleLeadUpload} className="w-72"/>
                 <div className="row">
                   <label className="small">Import mode:</label>
                   <select value={importMode} onChange={e=>setImportMode(e.target.value)}>
@@ -1500,7 +1735,7 @@
               </div>
 
               <div className="card mt-16" style={{padding:"16px"}}>
-                <AddLeadForm onAdd={(obj)=>{ const cleaned=cleanLeadRecord(obj); setLeads(prev=>dedupeAppend(prev,[cleaned])); setSelectedIndex(0); }}/>
+                <AddLeadForm onAdd={(obj)=>{ const cleaned=cleanLeadRecord(obj); setLeads(prev=>mergeLeadBatch(prev,[cleaned],'append').next); setSelectedIndex(0); }}/>
               </div>
 
               <Tests/>
@@ -1508,7 +1743,7 @@
           ) : (
             <>
               <div className="row mb-16">
-                <input type="file" accept=".csv" onChange={handleBuyerUpload} className="w-72"/>
+                <input type="file" accept=".csv,.xlsx,.xls" onChange={handleBuyerUpload} className="w-72"/>
                 <div className="row">
                   <label className="small">Import mode:</label>
                   <select value={buyersImportMode} onChange={e=>setBuyersImportMode(e.target.value)}>
@@ -1628,6 +1863,55 @@
                 <div className="muted">CSV buyer headers: <code>Buyer Name / Company, Phone, Email, Buy Box - Counties, Buy Box - States, Min Acres, Max Acres, Min Price, Max Price, Funding Type (Cash/Hard Money)</code></div>
               </div>
             </>
+          )}
+          {importPreview && (
+            <div className="modal-backdrop">
+              <div className="modal">
+                <header>Import Preview</header>
+                <div className="modal-body">
+                  <p style={{margin:"0 0 6px"}}><strong>{importPreview.fileName || "Import"}</strong></p>
+                  <p className="muted small" style={{margin:"0 0 16px"}}>
+                    Mode: {importPreview.mode === 'replace' ? 'Replace all leads (overwrite existing records)' : 'Append & merge by APN + County'}
+                  </p>
+                  <div className="count-grid">
+                    <div className="count-card">
+                      <div className="label">New</div>
+                      <div className="value">{importPreview.counts?.new ?? 0}</div>
+                    </div>
+                    <div className="count-card">
+                      <div className="label">Merged</div>
+                      <div className="value">{importPreview.counts?.merged ?? 0}</div>
+                    </div>
+                    <div className="count-card">
+                      <div className="label">Skipped</div>
+                      <div className="value">{importPreview.counts?.skipped ?? 0}</div>
+                    </div>
+                  </div>
+                  {importSummarySections.length ? (
+                    <div style={{display:'grid', gap:'8px', marginBottom:'12px'}}>
+                      {importSummarySections.map(section=>(
+                        <div key={section.label}>
+                          <div style={{fontWeight:600, fontSize:"13px"}}>{section.label}</div>
+                          <div className="muted small">{section.items.join(', ')}</div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  {actionableImportCount === 0 ? (
+                    <p className="muted">No new or updated leads detected. All rows in this file were skipped.</p>
+                  ) : (
+                    <p className="muted small" style={{margin:"0"}}>Review the summary above and click Apply to merge these changes.</p>
+                  )}
+                  {importSkippedCount > 0 ? (
+                    <p className="muted small" style={{marginTop:"8px"}}>Skipped rows usually miss APN+County or Owner+Address+County.</p>
+                  ) : null}
+                </div>
+                <div className="modal-footer">
+                  <button className="btn ghost" onClick={cancelImportPreview}>Cancel</button>
+                  <button className="btn brand" disabled={!actionableImportCount} onClick={confirmImportPreview}>Apply Import</button>
+                </div>
+              </div>
+            </div>
           )}
         </>
       );
