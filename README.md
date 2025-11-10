@@ -8,6 +8,12 @@ This project is a static, browser-based CRM prototype. To see the live preview:
 
 All changes you make in the UI persist automatically in `localStorage`.
 
+## Features
+
+* Lead management with history logging, buyer assignments, and bulk geocoding tools.
+* A dedicated **Buyers** tab with county, acreage, and price range filters plus buyer history tracking.
+* Automatic local persistence so uploaded leads, buyers, and notes survive page refreshes.
+
 ## Geocoding
 
 The **Geocode via OpenStreetMap** button reverse-geocodes the selected or missing-coordinate leads using OpenStreetMap's Nominatim service. Requests are throttled to one every 1.2 seconds to remain within the public usage policy.

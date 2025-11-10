@@ -3,6 +3,52 @@
   const sleep = (ms)=> new Promise(resolve=>setTimeout(resolve, ms));
   const GEOCODE_THROTTLE_MS = 1200;
   const NOMINATIM_ENDPOINT = "https://nominatim.openstreetmap.org/search";
+  const COORDINATE_PLACEHOLDER_THRESHOLD = 1e-9;
+  const TEXT_PLACEHOLDER_VALUES = new Set(["—", "-"]);
+
+  const asNumber = (v)=>{
+    if(v === null || v === undefined) return undefined;
+    const s = String(v).trim();
+    if(!s) return undefined;
+    const lower = s.toLowerCase();
+    if(TEXT_PLACEHOLDER_VALUES.has(s) || lower === "na" || lower === "null") return undefined;
+    const n = Number(s);
+    if(Number.isFinite(n)) return n;
+    const fallback = Number(s.replace(/[^0-9.\-]/g, ""));
+    return Number.isFinite(fallback) ? fallback : undefined;
+  };
+
+  const stripPlaceholderText = (value)=>{
+    if(value === null || value === undefined) return "";
+    const s = String(value).trim();
+    if(!s) return "";
+    if(TEXT_PLACEHOLDER_VALUES.has(s)) return "";
+    return s;
+  };
+
+  const rawCoordinateToNumber = (value)=>{
+    const numeric = asNumber(value);
+    if(!Number.isFinite(numeric)) return undefined;
+    return numeric;
+  };
+  const normalizeLatitude = (value)=>{
+    const numeric = rawCoordinateToNumber(value);
+    if(!Number.isFinite(numeric)) return undefined;
+    if(numeric < -90 || numeric > 90) return undefined;
+    return numeric;
+  };
+  const normalizeLongitude = (value)=>{
+    const numeric = rawCoordinateToNumber(value);
+    if(!Number.isFinite(numeric)) return undefined;
+    if(numeric < -180 || numeric > 180) return undefined;
+    return numeric;
+  };
+  const normalizeCoordinate = rawCoordinateToNumber;
+  const coordinatesLookValid = (lat, lon)=>{
+    if(!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+    if(Math.abs(lat) <= COORDINATE_PLACEHOLDER_THRESHOLD && Math.abs(lon) <= COORDINATE_PLACEHOLDER_THRESHOLD) return false;
+    return true;
+  };
   const GEOCODE_PROVIDERS = [
     {
       name: "OpenStreetMap",
@@ -10,8 +56,9 @@
       buildUrl: (query)=>`${NOMINATIM_ENDPOINT}?format=json&limit=1&addressdetails=0&email=landcrm-demo@example.com&q=${encodeURIComponent(query)}`,
       parse: (payload)=>{
         if(Array.isArray(payload) && payload[0]){
-          const lat=Number(payload[0].lat), lon=Number(payload[0].lon);
-          if(Number.isFinite(lat) && Number.isFinite(lon)) return {lat, lon};
+          const lat = normalizeLatitude(payload[0].lat ?? payload[0].latitude);
+          const lon = normalizeLongitude(payload[0].lon ?? payload[0].lng ?? payload[0].longitude);
+          if(coordinatesLookValid(lat, lon)) return {lat, lon};
         }
         return null;
       }
@@ -39,7 +86,11 @@
       if(!res || !res.ok) return null;
       const payload = await res.json();
       const coords = GEOCODE_PROVIDERS[0].parse(payload);
-      return coords ? {...coords, provider: GEOCODE_PROVIDERS[0].name} : null;
+      if(!coords) return null;
+      const lat = normalizeLatitude(coords.lat ?? coords.latitude);
+      const lon = normalizeLongitude(coords.lon ?? coords.lng ?? coords.longitude);
+      if(!coordinatesLookValid(lat, lon)) return null;
+      return {lat, lon, provider: GEOCODE_PROVIDERS[0].name};
     }catch(err){
       console.warn("OpenStreetMap geocode failed", err);
       return null;
@@ -47,23 +98,27 @@
   }
   const makeId = ()=>`id_${Math.random().toString(36).slice(2)}_${Date.now().toString(36)}`;
   const formatDateTime = (iso)=>{ try{ return new Date(iso).toLocaleString(); }catch{ return iso || ""; } };
-  const makeHistoryEntry = (type, note)=>({id:makeId(), type:type||"Note", note, timestamp:new Date().toISOString()});
+  const makeHistoryEntry = (type, note, extras)=>({
+    id: makeId(),
+    type: type || "Note",
+    note,
+    timestamp: new Date().toISOString(),
+    ...(extras && typeof extras === 'object' ? extras : null)
+  });
   const toNumber = (x)=>{ const raw=String(x??"").replace(/[$,\s]/g,""); if(!raw) return undefined; const n=Number(raw); return Number.isFinite(n)?n:undefined; };
-  const normalizeCoordinate = (value)=>{
-    if(value === null || value === undefined) return undefined;
-    if(typeof value === 'number') return Number.isFinite(value) ? value : undefined;
-    const raw = String(value).trim();
-    if(!raw) return undefined;
-    const cleaned = raw.replace(/[^0-9.\-]/g, '');
-    if(!cleaned || cleaned === '-' || cleaned === '.' || cleaned === '-.' || cleaned === '.-') return undefined;
-    const numeric = Number(cleaned);
-    return Number.isFinite(numeric) ? numeric : undefined;
+  const hasCoords = (obj)=>{
+    if(!obj || typeof obj !== 'object') return false;
+    const lat = normalizeLatitude(obj.Latitude ?? obj.lat ?? obj.latitude);
+    const lon = normalizeLongitude(obj.Longitude ?? obj.lon ?? obj.longitude);
+    return coordinatesLookValid(lat, lon);
   };
-  const leadHasCoordinates = (lead)=>{
-    if(!lead || typeof lead !== 'object') return false;
-    const lat = normalizeCoordinate(lead.Latitude);
-    const lon = normalizeCoordinate(lead.Longitude);
-    return Number.isFinite(lat) && Number.isFinite(lon);
+  const needsCoords = (obj)=> !hasCoords(obj);
+  const leadHasCoordinates = hasCoords;
+  const computeGeocodeTargets = (leads, selectedIds)=>{
+    const list = Array.isArray(leads) ? leads : [];
+    const selectedSet = selectedIds instanceof Set ? selectedIds : (selectedIds ? new Set(selectedIds) : null);
+    const base = (selectedSet && selectedSet.size) ? list.filter(l=>selectedSet.has(l.__id)) : list;
+    return base.map((l, idx)=>({l, idx})).filter(({l})=>needsCoords(l));
   };
   const buildGeocodeQuery = (l)=>{
     if(!l) return '';
@@ -89,26 +144,64 @@
     if(apn) return apn;
     return String(l["Owner Name"]||'').trim();
   };
+  function applyGeocodeResult(lead, coords){
+    if(!lead || typeof lead !== 'object') return lead;
+    const latCandidate = coords && (coords.lat ?? coords.Latitude ?? coords.latitude);
+    const lonCandidate = coords && (coords.lon ?? coords.lng ?? coords.Longitude ?? coords.longitude);
+    const lat = normalizeLatitude(latCandidate);
+    const lon = normalizeLongitude(lonCandidate);
+    if(!coordinatesLookValid(lat, lon)) return lead;
+    const existingLat = normalizeLatitude(lead.Latitude);
+    const existingLon = normalizeLongitude(lead.Longitude);
+    const provider = coords && (coords.provider || coords.source || null);
+    const next = {...lead};
+    let changed = false;
+    if(existingLat !== lat || typeof next.Latitude !== 'number'){
+      next.Latitude = lat;
+      changed = true;
+    }
+    if(existingLon !== lon || typeof next.Longitude !== 'number'){
+      next.Longitude = lon;
+      changed = true;
+    }
+    if(provider){
+      const note = `Coordinates verified via ${provider}`;
+      const historyBase = Array.isArray(lead.__log) ? lead.__log : (Array.isArray(lead.__history) ? lead.__history : []);
+      const history = historyBase.slice();
+      const alreadyLogged = history.length && history[0] && history[0].type === "Status" && history[0].note === note;
+      if(!alreadyLogged){
+        history.unshift(makeHistoryEntry("Status", note));
+        next.__history = history;
+        next.__log = history;
+        changed = true;
+      }
+    }
+    return changed ? next : lead;
+  }
   function sanitizeHistory(list){
     if(!Array.isArray(list)) return [];
     return list.map(entry=>{
       if(!entry || typeof entry!=="object"){
         return makeHistoryEntry("Note", String(entry ?? ""));
       }
+      const nextActionCandidate = entry.nextActionDate || entry.nextAction || entry.followUpDate || entry.follow_up_date;
+      const normalizedNextAction = nextActionCandidate ? String(nextActionCandidate).trim() : "";
+      const extras = normalizedNextAction ? { nextActionDate: normalizedNextAction } : {};
       return {
         id: entry.id || makeId(),
         type: entry.type || entry.kind || "Note",
         note: entry.note ?? entry.text ?? "",
-        timestamp: entry.timestamp || entry.date || new Date().toISOString()
+        timestamp: entry.timestamp || entry.date || new Date().toISOString(),
+        ...extras
       };
     });
   }
   function cleanLeadRecord(o){
     const normalized = {
       ...o,
-      "Owner Name":o["Owner Name"]||"", County:o["County"]||"", "Site Address":o["Site Address"]||"",
-      "Estimated Market Value":o["Estimated Market Value"]||"", APN:o["APN"]||"",
-      Latitude: normalizeCoordinate(o["Latitude"]), Longitude: normalizeCoordinate(o["Longitude"]),
+      "Owner Name":stripPlaceholderText(o["Owner Name"]||o.owner||""), County:stripPlaceholderText(o["County"]||""), "Site Address":stripPlaceholderText(o["Site Address"]||""),
+      "Estimated Market Value":stripPlaceholderText(o["Estimated Market Value"]||""), APN:stripPlaceholderText(o["APN"]||""),
+      Latitude: normalizeLatitude(asNumber(o["Latitude"] ?? o.lat ?? o.latitude)), Longitude: normalizeLongitude(asNumber(o["Longitude"] ?? o.lon ?? o.longitude)),
       Acreage: o["Acreage"] || o["Lot Acres"] || o["Lot Size (acres)"] || "",
       "First Name": o["First Name"]||o["First Name (0)"]||"", "Last Name": o["Last Name"]||o["Last Name (0)"]||"",
       "Company Name": o["Company Name"]||"", "Street Address": o["Street Address"]||"", City:o["City"]||"", State:o["State"]||"", Zip:o["Zip"]||"",
@@ -118,16 +211,17 @@
       __notes:o.__notes||"", __lastContacted:o.__lastContacted||"", __nextAction:o.__nextAction||"", __tags:Array.isArray(o.__tags)?o.__tags:[],
       __assignedBuyerId: o.__assignedBuyerId || null
     };
-    const history = sanitizeHistory(o.__history);
-    return {...normalized, __history:history, __id:o.__id || makeId()};
+    const history = sanitizeHistory(o.__log || o.__history);
+    return {...normalized, __history:history, __log:history, __id:o.__id || makeId()};
   }
   function cleanBuyerRecord(o){
     const normalized = {
       ...o,
       __notes:o.__notes||"",
-      __history:sanitizeHistory(o.__history)
+      __history:sanitizeHistory(o.__log || o.__history)
     };
-    return {...normalized, __id:o.__id || makeId()};
+    const history = normalized.__history;
+    return {...normalized, __history:history, __log:history, __id:o.__id || makeId()};
   }
   const now = Date.now();
   const isoDaysAgo = (days)=> new Date(now - days*86400000).toISOString();
@@ -152,7 +246,7 @@
       __nextAction: "Send purchase agreement draft",
       __lastContacted: dateDaysAgo(2),
       __assignedBuyerId: null,
-      __history: [
+      __log: [
         {...makeHistoryEntry("Call", "Spoke with John – property is vacant and taxes are current."), timestamp: isoDaysAgo(6)},
         {...makeHistoryEntry("Note", "Mailed follow-up packet with offer range."), timestamp: isoDaysAgo(4)},
         {...makeHistoryEntry("Offer", "Working on written offer around $9,500."), timestamp: isoDaysAgo(1)}
@@ -177,7 +271,7 @@
       __nextAction: "Research comps and call back",
       __lastContacted: dateDaysAgo(5),
       __assignedBuyerId: null,
-      __history: [
+      __log: [
         {...makeHistoryEntry("Note", "Lead imported from PropStream CSV."), timestamp: isoDaysAgo(10)},
         {...makeHistoryEntry("Task", "Pull three nearby sold comps."), timestamp: isoDaysAgo(3)}
       ]
@@ -196,7 +290,7 @@
       "Phone":"(352) 555-0118",
       "Email":"offers@landpath.com",
       __notes: "Prefers infill lots close to paved roads.",
-      __history: [
+      __log: [
         {...makeHistoryEntry("Assignment", "Closed Inverness lot assignment in May."), timestamp: isoDaysAgo(25)},
         {...makeHistoryEntry("Call", "Interested in 0.25-0.5 acre inventory in Citrus."), timestamp: isoDaysAgo(7)}
       ]
@@ -213,7 +307,7 @@
       "Phone":"(813) 555-0194",
       "Email":"acq@sunstate.com",
       __notes: "Will take down multiple lots at once.",
-      __history: [
+      __log: [
         {...makeHistoryEntry("Note", "Met at Tampa meetup – send over Citrus list weekly."), timestamp: isoDaysAgo(14)}
       ]
     },
@@ -229,7 +323,7 @@
       "Phone":"(407) 555-0137",
       "Email":"closings@trailblazer.cap",
       __notes: "Has rehab crew for light clearing; needs 30-day close.",
-      __history: [
+      __log: [
         {...makeHistoryEntry("Call", "Checking on Polk pipeline; asked for 3 new deals."), timestamp: isoDaysAgo(5)}
       ]
     }
@@ -241,6 +335,7 @@
     makeId,
     formatDateTime,
     makeHistoryEntry,
+    asNumber,
     toNumber,
     sanitizeHistory,
     cleanLeadRecord,
@@ -250,7 +345,13 @@
     isoDaysAgo,
     dateDaysAgo,
     normalizeCoordinate,
+    normalizeLatitude,
+    normalizeLongitude,
+    applyGeocodeResult,
     leadHasCoordinates,
+    hasCoords,
+    needsCoords,
+    computeGeocodeTargets,
     buildGeocodeQuery,
     GEOCODE_THROTTLE_MS,
     awaitGeocodeWindow,

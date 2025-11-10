@@ -42,6 +42,17 @@
     .center{display:flex;align-items:center;justify-content:center}
     .selected{background:#ecfdf5}
     .kbd{background:#eef2ff;border:1px solid #c7d2fe;border-radius:6px;padding:2px 6px;font-size:12px}
+    details.panel{border:1px solid var(--line);border-radius:12px;margin-bottom:12px;background:#fff;overflow:hidden}
+    details.panel summary{list-style:none;cursor:pointer;display:flex;align-items:center;justify-content:space-between;padding:12px 16px;font-weight:600}
+    details.panel summary::-webkit-details-marker{display:none}
+    details.panel[open] summary{border-bottom:1px solid var(--line)}
+    details.panel .panel-body{padding:12px 16px 16px}
+    .badge{display:inline-flex;align-items:center;font-size:11px;border-radius:999px;padding:2px 8px;background:#e2e8f0;color:#334155;margin-left:6px}
+    .badge.primary{background:#ddd6fe;color:#5b21b6}
+    .badge.danger{background:#fee2e2;color:#b91c1c}
+    .contact-item{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#fff}
+    .contact-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+    .contact-actions a,.contact-actions button{font-size:12px;padding:6px 10px}
   </style>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -56,6 +67,70 @@
 
     const CRM = window.CRM_LOGIC || {};
     const DEFAULT_HISTORY_TYPES = ["Note","Call","Offer","Follow-up","Task","Status","Assignment","Lead Assignment"];
+    const fallbackAsNumber = (v)=>{
+      if(v === null || v === undefined) return undefined;
+      const s = String(v).trim();
+      if(!s || s === "—" || s === "-") return undefined;
+      const lower = s.toLowerCase();
+      if(lower === "na" || lower === "null") return undefined;
+      const n = Number(s);
+      if(Number.isFinite(n)) return n;
+      const fallback = Number(s.replace(/[^0-9.\-]/g, ""));
+      return Number.isFinite(fallback) ? fallback : undefined;
+    };
+    const asNumber = typeof CRM.asNumber === "function" ? CRM.asNumber : fallbackAsNumber;
+    const stripPlaceholderText = (value)=>{
+      if(value === null || value === undefined) return "";
+      const s = String(value).trim();
+      if(!s || s === "—" || s === "-") return "";
+      return s;
+    };
+    const rawCoordinateToNumber = typeof CRM.normalizeCoordinate === "function"
+      ? CRM.normalizeCoordinate
+      : ((value)=>{
+          const numeric = asNumber(value);
+          if(!Number.isFinite(numeric)) return undefined;
+          return numeric;
+        });
+    const normalizeLatitude = typeof CRM.normalizeLatitude === "function"
+      ? CRM.normalizeLatitude
+      : ((value)=>{
+          const numeric = asNumber(value);
+          if(!Number.isFinite(numeric)) return undefined;
+          if(numeric < -90 || numeric > 90) return undefined;
+          return numeric;
+        });
+    const normalizeLongitude = typeof CRM.normalizeLongitude === "function"
+      ? CRM.normalizeLongitude
+      : ((value)=>{
+          const numeric = asNumber(value);
+          if(!Number.isFinite(numeric)) return undefined;
+          if(numeric < -180 || numeric > 180) return undefined;
+          return numeric;
+        });
+    const coordinatesLookValid = (lat, lon)=>{
+      if(!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+      if(Math.abs(lat) <= 1e-9 && Math.abs(lon) <= 1e-9) return false;
+      return true;
+    };
+    const normalizeCoordinate = rawCoordinateToNumber;
+    const hasCoords = typeof CRM.hasCoords === "function"
+      ? CRM.hasCoords
+      : ((obj)=>{
+          if(!obj || typeof obj !== "object") return false;
+          const lat = normalizeLatitude(obj.Latitude ?? obj.lat ?? obj.latitude);
+          const lon = normalizeLongitude(obj.Longitude ?? obj.lon ?? obj.longitude);
+          return coordinatesLookValid(lat, lon);
+        });
+    const needsCoords = typeof CRM.needsCoords === "function" ? CRM.needsCoords : (obj=>!hasCoords(obj));
+    const computeGeocodeTargets = typeof CRM.computeGeocodeTargets === "function"
+      ? CRM.computeGeocodeTargets
+      : ((leads, selected)=>{
+          const list = Array.isArray(leads) ? leads : [];
+          const selectedSet = selected instanceof Set ? selected : (selected ? new Set(selected) : null);
+          const base = (selectedSet && selectedSet.size) ? list.filter(l=>selectedSet.has(l.__id)) : list;
+          return base.map((l, idx)=>({l, idx})).filter(({l})=>needsCoords(l));
+        });
     const DEFAULT_GEOCODE_PROVIDERS = [
       {
         name: "OpenStreetMap",
@@ -63,8 +138,9 @@
         buildUrl: (query)=>`https://nominatim.openstreetmap.org/search?format=json&limit=1&addressdetails=0&email=landcrm-demo@example.com&q=${encodeURIComponent(query)}`,
         parse: (payload)=>{
           if(Array.isArray(payload) && payload[0]){
-            const lat=Number(payload[0].lat), lon=Number(payload[0].lon);
-            if(Number.isFinite(lat) && Number.isFinite(lon)) return {lat, lon};
+            const lat = normalizeLatitude(payload[0].lat ?? payload[0].latitude);
+            const lon = normalizeLongitude(payload[0].lon ?? payload[0].lng ?? payload[0].longitude);
+            if(coordinatesLookValid(lat, lon)) return {lat, lon};
           }
           return null;
         }
@@ -78,7 +154,15 @@
     };
     const formatDateTime = typeof CRM.formatDateTime === "function" ? CRM.formatDateTime : fallbackFormatDateTime;
     const makeId = typeof CRM.makeId === "function" ? CRM.makeId : (()=>`id_${Math.random().toString(36).slice(2)}_${Date.now().toString(36)}`);
-    const makeHistoryEntry = typeof CRM.makeHistoryEntry === "function" ? CRM.makeHistoryEntry : ((type, note)=>({id:makeId(), type:type||"Note", note:note ?? "", timestamp:new Date().toISOString()}));
+    const makeHistoryEntry = typeof CRM.makeHistoryEntry === "function"
+      ? CRM.makeHistoryEntry
+      : ((type, note, extras)=>({
+          id: makeId(),
+          type: type || "Note",
+          note: note ?? "",
+          timestamp: new Date().toISOString(),
+          ...(extras && typeof extras === "object" ? extras : null)
+        }));
     const {DEFAULT_SAMPLE_LEADS, DEFAULT_SAMPLE_BUYERS} = (()=>{
       const now = Date.now();
       const isoDaysAgo = (days)=> new Date(now - days*86400000).toISOString();
@@ -104,7 +188,7 @@
             __nextAction: "Send purchase agreement draft",
             __lastContacted: isoDaysAgo(2).slice(0,10),
             __assignedBuyerId: null,
-            __history: [
+            __log: [
               entry(6, "Call", "Spoke with John – property is vacant and taxes are current."),
               entry(4, "Note", "Mailed follow-up packet with offer range."),
               entry(1, "Offer", "Working on written offer around $9,500.")
@@ -129,7 +213,7 @@
             __nextAction: "Research comps and call back",
             __lastContacted: isoDaysAgo(5).slice(0,10),
             __assignedBuyerId: null,
-            __history: [
+            __log: [
               entry(10, "Note", "Lead imported from PropStream CSV."),
               entry(3, "Task", "Pull three nearby sold comps.")
             ]
@@ -148,7 +232,7 @@
             "Phone":"(352) 555-0118",
             "Email":"offers@landpath.com",
             __notes: "Prefers infill lots close to paved roads.",
-            __history: [
+            __log: [
               entry(25, "Assignment", "Closed Inverness lot assignment in May."),
               entry(7, "Call", "Interested in 0.25-0.5 acre inventory in Citrus.")
             ]
@@ -165,7 +249,7 @@
             "Phone":"(813) 555-0194",
             "Email":"acq@sunstate.com",
             __notes: "Will take down multiple lots at once.",
-            __history: [
+            __log: [
               entry(14, "Note", "Met at Tampa meetup – send over Citrus list weekly.")
             ]
           },
@@ -181,7 +265,7 @@
             "Phone":"(407) 555-0137",
             "Email":"closings@trailblazer.cap",
             __notes: "Has rehab crew for light clearing; needs 30-day close.",
-            __history: [
+            __log: [
               entry(5, "Call", "Checking on Polk pipeline; asked for 3 new deals.")
             ]
           }
@@ -189,26 +273,13 @@
       };
     })();
     const PHONE_FIELDS = [
-      "Cell","Cell 2","Cell 3","Landline","Landline 2","Landline 3","Landline 4",
-      "Phone","Phone 1","Phone 2","Phone 3","Other Phone","Primary Phone","Secondary Phone"
+      "Cell","Cell 2","Landline","Landline 2","Phone 1","Phone 2",
+      "Phone","Cell 3","Landline 3","Landline 4","Phone 3","Other Phone","Primary Phone","Secondary Phone"
     ];
+    const DNC_FIELDS = ["DNC","DNC 2","DNC 3","DNC 4"];
     const EMAIL_FIELDS = ["Email","Email 1","Email 2","Email 3","Primary Email","Secondary Email"];
-    const normalizeCoordinate = typeof CRM.normalizeCoordinate === "function" ? CRM.normalizeCoordinate : ((value)=>{
-      if(value === null || value === undefined) return undefined;
-      if(typeof value === "number") return Number.isFinite(value) ? value : undefined;
-      const raw = String(value).trim();
-      if(!raw) return undefined;
-      const cleaned = raw.replace(/[^0-9.\-]/g, "");
-      if(!cleaned || cleaned === "-" || cleaned === "." || cleaned === "-." || cleaned === ".-") return undefined;
-      const numeric = Number(cleaned);
-      return Number.isFinite(numeric) ? numeric : undefined;
-    });
-    const leadHasCoordinates = typeof CRM.leadHasCoordinates === "function" ? CRM.leadHasCoordinates : ((lead)=>{
-      if(!lead || typeof lead !== "object") return false;
-      const lat = normalizeCoordinate(lead?.Latitude);
-      const lon = normalizeCoordinate(lead?.Longitude);
-      return Number.isFinite(lat) && Number.isFinite(lon);
-    });
+    const DNC_VALUES = new Set(["yes","y","true","1","dnc","do not call","do-not-call"]);
+    const leadHasCoordinates = typeof CRM.leadHasCoordinates === "function" ? CRM.leadHasCoordinates : hasCoords;
     const normalizePhoneHref = (value)=>{
       const digits = String(value ?? "").replace(/[^0-9+]/g,"");
       if(!digits) return "";
@@ -216,6 +287,76 @@
       if(digits.length===11 && digits.startsWith("1")) return `+${digits}`;
       if(digits.length===10) return `+1${digits}`;
       return digits;
+    };
+    const extractPhones = (lead)=>{
+      if(!lead) return [];
+      const dncs = new Set(DNC_FIELDS.filter(field=>{
+        const value = String(lead[field] ?? "").trim().toLowerCase();
+        return value && DNC_VALUES.has(value);
+      }));
+      const seen = new Set();
+      const entries = [];
+      PHONE_FIELDS.forEach((field)=>{
+        const raw = lead[field];
+        const value = typeof raw === "number" ? String(raw) : String(raw ?? "").trim();
+        if(!value || value === "—") return;
+        const href = normalizePhoneHref(value);
+        if(!href || seen.has(href)) return;
+        seen.add(href);
+        entries.push({
+          field,
+          value,
+          href,
+          isDNC: dncs.size > 0,
+        });
+      });
+      return entries.map((entry, index)=>({
+        ...entry,
+        isPrimary: index === 0
+      }));
+    };
+    const extractEmails = (lead)=>{
+      if(!lead) return [];
+      const seen = new Set();
+      const entries = [];
+      EMAIL_FIELDS.forEach((field)=>{
+        const raw = lead[field];
+        const value = typeof raw === "number" ? String(raw) : String(raw ?? "").trim();
+        if(!value || value === "—") return;
+        const key = value.toLowerCase();
+        if(seen.has(key)) return;
+        seen.add(key);
+        entries.push({
+          field,
+          value,
+          isPrimary: entries.length === 0
+        });
+      });
+      return entries;
+    };
+    const copyToClipboard = async (value)=>{
+      if(!value) return;
+      try{
+        if(navigator.clipboard && typeof navigator.clipboard.writeText === "function"){
+          await navigator.clipboard.writeText(value);
+          return;
+        }
+      }catch(err){
+        console.warn("Clipboard API failed", err);
+      }
+      const textarea = document.createElement("textarea");
+      textarea.value = value;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "absolute";
+      textarea.style.left = "-9999px";
+      document.body.appendChild(textarea);
+      textarea.select();
+      try{
+        document.execCommand("copy");
+      }catch(err){
+        console.warn("Fallback copy failed", err);
+      }
+      document.body.removeChild(textarea);
     };
     const sanitizeHistory = typeof CRM.sanitizeHistory === "function" ? CRM.sanitizeHistory : ((list)=>{
       if(!Array.isArray(list)) return [];
@@ -239,33 +380,98 @@
       const n = Number(raw);
       return Number.isFinite(n) ? n : undefined;
     });
-    const cleanLeadRecord = typeof CRM.cleanLeadRecord === "function" ? CRM.cleanLeadRecord : ((o={})=>({
-      ...o,
-      Latitude: normalizeCoordinate(o.Latitude),
-      Longitude: normalizeCoordinate(o.Longitude),
-      __history: sanitizeHistory(o.__history),
-      __id: o.__id || makeId()
-    }));
-    const cleanBuyerRecord = typeof CRM.cleanBuyerRecord === "function" ? CRM.cleanBuyerRecord : ((o={})=>({
-      ...o,
-      __history: sanitizeHistory(o.__history),
-      __id: o.__id || makeId()
-    }));
+    const cleanLeadRecord = typeof CRM.cleanLeadRecord === "function" ? CRM.cleanLeadRecord : ((o={})=>{
+      const history = sanitizeHistory(o.__log || o.__history);
+      return {
+        ...o,
+        "Owner Name": stripPlaceholderText(o["Owner Name"]||o.owner||""),
+        County: stripPlaceholderText(o["County"]||""),
+        "Site Address": stripPlaceholderText(o["Site Address"]||""),
+        "Estimated Market Value": stripPlaceholderText(o["Estimated Market Value"]||""),
+        APN: stripPlaceholderText(o["APN"]||""),
+        Latitude: normalizeLatitude(asNumber(o["Latitude"] ?? o.lat ?? o.latitude)),
+        Longitude: normalizeLongitude(asNumber(o["Longitude"] ?? o.lon ?? o.longitude)),
+        __history: history,
+        __log: history,
+        __id: o.__id || makeId()
+      };
+    });
+    const cleanBuyerRecord = typeof CRM.cleanBuyerRecord === "function" ? CRM.cleanBuyerRecord : ((o={})=>{
+      const history = sanitizeHistory(o.__log || o.__history);
+      return {
+        ...o,
+        __history: history,
+        __log: history,
+        __id: o.__id || makeId()
+      };
+    });
+    const applyGeocodeResult = typeof CRM.applyGeocodeResult === "function"
+      ? CRM.applyGeocodeResult
+      : ((lead, coords={})=>{
+          if(!lead || typeof lead !== "object") return lead;
+          const lat = normalizeLatitude(coords.lat ?? coords.Latitude ?? coords.latitude);
+          const lon = normalizeLongitude(coords.lon ?? coords.lng ?? coords.Longitude ?? coords.longitude);
+          if(!coordinatesLookValid(lat, lon)) return lead;
+          const existingLat = normalizeLatitude(lead.Latitude);
+          const existingLon = normalizeLongitude(lead.Longitude);
+          const provider = coords.provider || coords.source || null;
+          const next = {...lead};
+          let changed = false;
+          if(existingLat !== lat || typeof next.Latitude !== "number"){
+            next.Latitude = lat;
+            changed = true;
+          }
+          if(existingLon !== lon || typeof next.Longitude !== "number"){
+            next.Longitude = lon;
+            changed = true;
+          }
+          if(provider){
+            const note = `Coordinates verified via ${provider}`;
+            const historyBase = Array.isArray(lead.__log) ? lead.__log : (Array.isArray(lead.__history) ? lead.__history : []);
+            const historyClone = historyBase.slice();
+            const alreadyLogged = historyClone.length && historyClone[0] && historyClone[0].type === "Status" && historyClone[0].note === note;
+            if(!alreadyLogged){
+              historyClone.unshift(makeHistoryEntry("Status", note));
+              next.__history = historyClone;
+              next.__log = historyClone;
+              changed = true;
+            }
+          }
+          return changed ? next : lead;
+        });
     const GEOCODE_PROVIDERS = Array.isArray(CRM.GEOCODE_PROVIDERS) && CRM.GEOCODE_PROVIDERS.length ? CRM.GEOCODE_PROVIDERS : DEFAULT_GEOCODE_PROVIDERS;
     const GEOCODE_THROTTLE_MS = typeof CRM.GEOCODE_THROTTLE_MS === "number" && CRM.GEOCODE_THROTTLE_MS>0 ? CRM.GEOCODE_THROTTLE_MS : (GEOCODE_PROVIDERS[0]?.throttleMs || 1200);
     const sampleLeads = Array.isArray(CRM.sampleLeads) && CRM.sampleLeads.length ? CRM.sampleLeads : DEFAULT_SAMPLE_LEADS;
     const sampleBuyers = Array.isArray(CRM.sampleBuyers) && CRM.sampleBuyers.length ? CRM.sampleBuyers : DEFAULT_SAMPLE_BUYERS;
+    const STORAGE_KEYS = {leads:"land_crm_leads", buyers:"land_crm_buyers"};
+    const readSavedRecords = (key)=>{
+      try{
+        if(typeof localStorage === "undefined") return null;
+        const raw = localStorage.getItem(key);
+        if(!raw) return null;
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : null;
+      }catch(err){
+        console.warn(`Failed to parse saved data for ${key}`, err);
+        return null;
+      }
+    };
 
     function App(){
       const [tab, setTab] = useState("leads");
 
       // Leads
-      const [leads, setLeads] = useState(()=> sampleLeads.map(cleanLeadRecord));
+      const [leads, setLeads] = useState(()=>{
+        const saved = readSavedRecords(STORAGE_KEYS.leads);
+        const base = saved && saved.length ? saved : sampleLeads;
+        return base.map(cleanLeadRecord);
+      });
       const [search, setSearch] = useState("");
       const [countyFilter, setCountyFilter] = useState("");
       const [selectedIndex, setSelectedIndex] = useState(0);
       const [leadLogType, setLeadLogType] = useState("Note");
       const [leadLogText, setLeadLogText] = useState("");
+      const [leadLogDate, setLeadLogDate] = useState("");
       const [importMode, setImportMode] = useState("append");
       const [mapEnabled, setMapEnabled] = useState(true);
       const [mapType, setMapType] = useState("street");
@@ -279,7 +485,11 @@
       const selectAllRef = useRef(null);
 
       // Buyers
-      const [buyers, setBuyers] = useState(()=> sampleBuyers.map(cleanBuyerRecord));
+      const [buyers, setBuyers] = useState(()=>{
+        const saved = readSavedRecords(STORAGE_KEYS.buyers);
+        const base = saved && saved.length ? saved : sampleBuyers;
+        return base.map(cleanBuyerRecord);
+      });
       const [selectedBuyerId, setSelectedBuyerId] = useState(null);
       const [buyerCounty, setBuyerCounty] = useState("");
       const [minAcres, setMinAcres] = useState("");
@@ -289,6 +499,9 @@
       const [buyersImportMode, setBuyersImportMode] = useState("append");
       const [buyerLogType, setBuyerLogType] = useState("Note");
       const [buyerLogText, setBuyerLogText] = useState("");
+      const [buyerLogDate, setBuyerLogDate] = useState("");
+      const [buyerMatchLeadId, setBuyerMatchLeadId] = useState(null);
+      const [buyerStatus, setBuyerStatus] = useState("");
 
       const leadLabel = (lead)=>{
         if(!lead) return "Lead";
@@ -323,30 +536,25 @@
         });
       };
 
-      // Load / save
+      // Save updates locally
       useEffect(()=>{
         try{
-          const s = localStorage.getItem("land_crm_leads");
-          if (s){
-            const parsed = JSON.parse(s);
-            if(Array.isArray(parsed)){
-              setLeads(parsed.map(cleanLeadRecord));
-            }
+          if(typeof localStorage !== "undefined"){
+            localStorage.setItem(STORAGE_KEYS.leads, JSON.stringify(leads));
           }
-        }catch(err){ console.warn("Failed to load saved leads", err); }
+        }catch(err){
+          console.warn("Failed to persist leads", err);
+        }
+      },[leads]);
+      useEffect(()=>{
         try{
-          const b = localStorage.getItem("land_crm_buyers");
-          if (b){
-            const parsedB = JSON.parse(b);
-            if(Array.isArray(parsedB)){
-              setBuyers(parsedB.map(cleanBuyerRecord));
-            }
+          if(typeof localStorage !== "undefined"){
+            localStorage.setItem(STORAGE_KEYS.buyers, JSON.stringify(buyers));
           }
-        }catch(err){ console.warn("Failed to load saved buyers", err); }
-        setSelectedIndex(0);
-      },[]);
-      useEffect(()=>{ try{localStorage.setItem("land_crm_leads", JSON.stringify(leads));}catch{} },[leads]);
-      useEffect(()=>{ try{localStorage.setItem("land_crm_buyers", JSON.stringify(buyers));}catch{} },[buyers]);
+        }catch(err){
+          console.warn("Failed to persist buyers", err);
+        }
+      },[buyers]);
       useEffect(()=>{
         setBulkSelection(prev=>{
           const allowed = new Set(leads.map(l=>l.__id));
@@ -486,8 +694,7 @@
       },[filteredLeads.length, selectedIndexSafe]);
       const selectedLead = selectedIndexSafe>=0 ? filteredLeads[selectedIndexSafe] : null;
       const selectedLeadId = selectedLead?.__id;
-      const selectedNeedsGeocode = selectedLead ? !leadHasCoordinates(selectedLead) : false;
-      useEffect(()=>{ setLeadLogText(""); setLeadLogType("Note"); },[selectedLeadId]);
+      useEffect(()=>{ setLeadLogText(""); setLeadLogType("Note"); setLeadLogDate(""); },[selectedLeadId]);
 
       const assignedBuyer = useMemo(()=> selectedLead ? buyers.find(b=>b.__id===selectedLead.__assignedBuyerId) || null : null, [buyers, selectedLead]);
       const matchingBuyers = useMemo(()=>{
@@ -505,37 +712,20 @@
           return countyOK && acresOK && priceOK;
         });
       },[buyers, selectedLead]);
-      const selectedLeadPhones = useMemo(()=>{
-        if(!selectedLead) return [];
-        const seen = new Set();
-        const entries = [];
-        for(const field of PHONE_FIELDS){
-          const raw = selectedLead[field];
-          const display = typeof raw === "number" ? String(raw) : String(raw ?? "").trim();
-          if(!display) continue;
-          const href = normalizePhoneHref(display);
-          if(!href) continue;
-          if(seen.has(href)) continue;
-          seen.add(href);
-          entries.push({label: field, display, href});
+      const matchLead = useMemo(()=> buyerMatchLeadId ? (leads.find(l=>l.__id===buyerMatchLeadId) || null) : null, [buyerMatchLeadId, leads]);
+      useEffect(()=>{
+        if(buyerMatchLeadId && !matchLead){
+          setBuyerMatchLeadId(null);
+          setBuyerStatus("Lead match cleared – lead no longer available.");
+        }else if(buyerMatchLeadId && matchLead){
+          setBuyerStatus(`Matching buyers for ${leadLabel(matchLead)}`);
+        }else if(!buyerMatchLeadId){
+          setBuyerStatus(prev=> prev.startsWith("Matching buyers") ? "" : prev);
         }
-        return entries;
-      },[selectedLead]);
-      const selectedLeadEmails = useMemo(()=>{
-        if(!selectedLead) return [];
-        const seen = new Set();
-        const entries = [];
-        for(const field of EMAIL_FIELDS){
-          const raw = selectedLead[field];
-          const value = typeof raw === "string" ? raw.trim() : String(raw ?? "").trim();
-          if(!value) continue;
-          const key = value.toLowerCase();
-          if(seen.has(key)) continue;
-          seen.add(key);
-          entries.push({label: field, value});
-        }
-        return entries;
-      },[selectedLead]);
+      },[buyerMatchLeadId, matchLead]);
+      const selectedLeadPhones = useMemo(()=> extractPhones(selectedLead), [selectedLead]);
+      const selectedLeadHasDNC = useMemo(()=> selectedLeadPhones.some(item=>item.isDNC), [selectedLeadPhones]);
+      const selectedLeadEmails = useMemo(()=> extractEmails(selectedLead), [selectedLead]);
 
       // Map URL
       const mapURL = React.useMemo(()=>{
@@ -555,13 +745,19 @@
         const n=(x)=>{ const v=Number(String(x??"").replace(/[$,\s]/g,"")); return Number.isFinite(v)?v:undefined; };
         const minA=n(minAcres)??-Infinity, maxA=n(maxAcres)??Infinity;
         const minP=n(minPrice)??-Infinity, maxP=n(maxPrice)??Infinity;
+        const countyTarget = matchLead ? (matchLead["County"]||"").toLowerCase() : "";
+        const acresTarget = matchLead ? toNumber(matchLead["Acreage"]) : undefined;
         return buyers.filter(b=>{
           const acresOK = (()=>{ const lo=n(b["Min Acres"])??-Infinity, hi=n(b["Max Acres"])??Infinity; return lo<=maxA && hi>=minA; })();
           const priceOK = (()=>{ const lo=n(b["Min Price"])??-Infinity, hi=n(b["Max Price"])??Infinity; return lo<=maxP && hi>=minP; })();
-          const countyOK = !buyerCounty || (b["Buy Box - Counties"]||"").toLowerCase().includes(buyerCounty.toLowerCase());
-          return acresOK && priceOK && countyOK;
+          const buyerCounties = (b["Buy Box - Counties"]||"").toLowerCase();
+          const countyFilterMatch = !buyerCounty || buyerCounties.includes(buyerCounty.toLowerCase());
+          const matchCountyOK = !countyTarget || buyerCounties.includes(countyTarget);
+          const matchAcresOK = !Number.isFinite(acresTarget)
+            || ((n(b["Min Acres"])??-Infinity) <= acresTarget && (n(b["Max Acres"])??Infinity) >= acresTarget);
+          return acresOK && priceOK && countyFilterMatch && (!matchLead || (matchCountyOK && matchAcresOK));
         });
-      },[buyers,minAcres,maxAcres,minPrice,maxPrice,buyerCounty]);
+      },[buyers,minAcres,maxAcres,minPrice,maxPrice,buyerCounty, matchLead]);
       useEffect(()=>{
         if(filteredBuyers.length){
           if(!selectedBuyerId || !filteredBuyers.some(b=>b.__id===selectedBuyerId)){
@@ -576,7 +772,7 @@
         return filteredBuyers.find(b=>b.__id===selectedBuyerId) || filteredBuyers[0];
       },[filteredBuyers, selectedBuyerId]);
       const selectedBuyerSafeId = selectedBuyer?.__id || null;
-      useEffect(()=>{ setBuyerLogText(""); },[selectedBuyerSafeId]);
+      useEffect(()=>{ setBuyerLogText(""); setBuyerLogType("Note"); setBuyerLogDate(""); },[selectedBuyerSafeId]);
       const assignedLeadsForBuyer = useMemo(()=>{
         if(!selectedBuyer) return [];
         return leads.filter(l=>l.__assignedBuyerId===selectedBuyer.__id);
@@ -584,35 +780,57 @@
 
       function handleAddLeadHistory(){
         if(!selectedLeadId || !leadLogText.trim()) return;
-        const entry = makeHistoryEntry(leadLogType, leadLogText.trim());
-        updateLeadById(selectedLeadId, current=>({
-          ...current,
-          __history:[entry,...(current.__history||[])]
-        }));
+        const extras = leadLogDate ? {nextActionDate: leadLogDate} : undefined;
+        const entry = makeHistoryEntry(leadLogType, leadLogText.trim(), extras);
+        updateLeadById(selectedLeadId, current=>{
+          const base = Array.isArray(current.__log) ? current.__log.slice() : Array.isArray(current.__history) ? current.__history.slice() : [];
+          base.unshift(entry);
+          return {...current, __history:base, __log:base};
+        });
         setLeadLogText("");
+        setLeadLogDate("");
       }
       function handleDeleteLeadHistory(id){
         if(!selectedLeadId) return;
-        updateLeadById(selectedLeadId, current=>({
-          ...current,
-          __history:(current.__history||[]).filter(entry=>entry.id!==id)
-        }));
+        updateLeadById(selectedLeadId, current=>{
+          const filtered = (Array.isArray(current.__log) ? current.__log : Array.isArray(current.__history) ? current.__history : []).filter(entry=>entry.id!==id);
+          return {...current, __history:filtered, __log:filtered};
+        });
       }
       function handleAddBuyerHistory(){
         if(!selectedBuyerSafeId || !buyerLogText.trim()) return;
-        const entry=makeHistoryEntry(buyerLogType, buyerLogText.trim());
-        updateBuyerById(selectedBuyerSafeId, current=>({
-          ...current,
-          __history:[entry,...(current.__history||[])]
-        }));
+        const extras = buyerLogDate ? {nextActionDate: buyerLogDate} : undefined;
+        const entry=makeHistoryEntry(buyerLogType, buyerLogText.trim(), extras);
+        updateBuyerById(selectedBuyerSafeId, current=>{
+          const base = Array.isArray(current.__log) ? current.__log.slice() : Array.isArray(current.__history) ? current.__history.slice() : [];
+          base.unshift(entry);
+          return {...current, __history:base, __log:base};
+        });
         setBuyerLogText("");
+        setBuyerLogDate("");
       }
       function handleDeleteBuyerHistory(id){
         if(!selectedBuyerSafeId) return;
-        updateBuyerById(selectedBuyerSafeId, current=>({
-          ...current,
-          __history:(current.__history||[]).filter(entry=>entry.id!==id)
-        }));
+        updateBuyerById(selectedBuyerSafeId, current=>{
+          const filtered = (Array.isArray(current.__log) ? current.__log : Array.isArray(current.__history) ? current.__history : []).filter(entry=>entry.id!==id);
+          return {...current, __history:filtered, __log:filtered};
+        });
+      }
+      function handleMatchSelectedLead(){
+        if(!selectedLead || !selectedLeadId){
+          setBuyerStatus("Select a lead in the Leads tab first to match buyers.");
+          return;
+        }
+        setBuyerMatchLeadId(selectedLeadId);
+        setBuyerStatus(`Matching buyers for ${leadLabel(selectedLead)}`);
+      }
+      function handleClearLeadMatch(){
+        if(!buyerMatchLeadId){
+          setBuyerStatus(prev=> prev.startsWith("Select a lead") ? prev : "");
+          return;
+        }
+        setBuyerMatchLeadId(null);
+        setBuyerStatus("Lead match cleared.");
       }
       function handleAssignBuyer(lead, buyerId){
         if(!lead) return;
@@ -621,7 +839,7 @@
         const prevId = lead.__assignedBuyerId || null;
         if(prevId===nextId) return;
         updateLeadById(leadId, current=>{
-          const history=current.__history?current.__history.slice():[];
+          const history=Array.isArray(current.__log) ? current.__log.slice() : Array.isArray(current.__history) ? current.__history.slice() : [];
           let entry=null;
           if(nextId){
             const buyer = buyers.find(b=>b.__id===nextId);
@@ -631,19 +849,21 @@
             entry = makeHistoryEntry("Assignment", `Unassigned from ${buyerLabel(prevBuyer)}`);
           }
           if(entry) history.unshift(entry);
-          return {...current, __assignedBuyerId:nextId, __history:history};
+          return {...current, __assignedBuyerId:nextId, __history:history, __log:history};
         });
         if(prevId && prevId!==nextId){
-          updateBuyerById(prevId, current=>({
-            ...current,
-            __history:[makeHistoryEntry("Lead Assignment", `Lead unassigned: ${leadLabel(lead)}`), ...(current.__history||[])]
-          }));
+          updateBuyerById(prevId, current=>{
+            const history = Array.isArray(current.__log) ? current.__log.slice() : Array.isArray(current.__history) ? current.__history.slice() : [];
+            history.unshift(makeHistoryEntry("Lead Assignment", `Lead unassigned: ${leadLabel(lead)}`));
+            return {...current, __history:history, __log:history};
+          });
         }
         if(nextId){
-          updateBuyerById(nextId, current=>({
-            ...current,
-            __history:[makeHistoryEntry("Lead Assignment", `Lead assigned: ${leadLabel(lead)}`), ...(current.__history||[])]
-          }));
+          updateBuyerById(nextId, current=>{
+            const history = Array.isArray(current.__log) ? current.__log.slice() : Array.isArray(current.__history) ? current.__history.slice() : [];
+            history.unshift(makeHistoryEntry("Lead Assignment", `Lead assigned: ${leadLabel(lead)}`));
+            return {...current, __history:history, __log:history};
+          });
         }
       }
 
@@ -683,17 +903,13 @@
       },[leads,selectedLead,compRadius]);
 
       // Geocode
-      const missingCount = useMemo(()=> leads.filter(l => !leadHasCoordinates(l)).length, [leads]);
       const bulkSelectionSet = useMemo(()=> new Set(bulkSelection), [bulkSelection]);
-      const bulkSelectedCount = bulkSelection.length;
+      const selectionActive = bulkSelectionSet.size > 0;
+      const missingCount = useMemo(()=> computeGeocodeTargets(leads).length, [leads]);
       const bulkSelectedMissingCount = useMemo(()=>{
-        if(!bulkSelection.length) return 0;
-        let count=0;
-        for(const lead of leads){
-          if(bulkSelectionSet.has(lead.__id) && !leadHasCoordinates(lead)) count++;
-        }
-        return count;
-      },[leads, bulkSelection, bulkSelectionSet]);
+        if(!selectionActive) return 0;
+        return computeGeocodeTargets(leads, bulkSelectionSet).length;
+      },[leads, bulkSelectionSet, selectionActive]);
       const filteredSelectionCount = useMemo(()=>{
         if(!filteredLeads.length || !bulkSelection.length) return 0;
         let count=0;
@@ -704,31 +920,23 @@
       },[filteredLeads, bulkSelection, bulkSelectionSet]);
       const filteredMissingCount = useMemo(()=>{
         if(!filteredLeads.length) return 0;
-        let count=0;
-        for(const lead of filteredLeads){
-          if(!leadHasCoordinates(lead)) count++;
-        }
-        return count;
-      },[filteredLeads]);
+        return filteredLeads.reduce((acc, lead)=> acc + (needsCoords(lead) ? 1 : 0), 0);
+      },[filteredLeads, needsCoords]);
       const filteredMissingSelectedCount = useMemo(()=>{
         if(!filteredLeads.length || !bulkSelection.length) return 0;
         let count=0;
         for(const lead of filteredLeads){
-          if(bulkSelectionSet.has(lead.__id) && !leadHasCoordinates(lead)) count++;
+          if(bulkSelectionSet.has(lead.__id) && needsCoords(lead)) count++;
         }
         return count;
-      },[filteredLeads, bulkSelection, bulkSelectionSet]);
-      const geocodeAvailable = (missingCount>0) || selectedNeedsGeocode || (bulkSelectedMissingCount>0) || (bulkSelectedCount>0);
-      const geocodeButtonDisabled = geocodeBusy || !geocodeAvailable;
+      },[filteredLeads, bulkSelection, bulkSelectionSet, needsCoords]);
+      const geocodeTargetCount = selectionActive ? bulkSelectedMissingCount : missingCount;
+      const geocodeButtonDisabled = geocodeBusy || geocodeTargetCount === 0;
       const geocodeButtonLabel = geocodeBusy
         ? `Geocoding ${geocodeProgress.done}/${geocodeProgress.total}…`
-        : bulkSelectedMissingCount>0
-          ? `Geocode Selected via OpenStreetMap (${bulkSelectedMissingCount}${bulkSelectedCount>bulkSelectedMissingCount ? `/${bulkSelectedCount}` : ""})`
-          : missingCount>0
-            ? `Geocode Missing via OpenStreetMap (${missingCount})`
-            : selectedNeedsGeocode
-              ? "Geocode Selected Lead via OpenStreetMap"
-              : "Geocode via OpenStreetMap";
+        : selectionActive
+          ? `Geocode Selected (${bulkSelectedMissingCount})`
+          : `Geocode Missing (${missingCount})`;
       const allFilteredSelected = filteredLeads.length>0 && filteredSelectionCount===filteredLeads.length;
       useEffect(()=>{
         if(selectAllRef.current){
@@ -834,9 +1042,13 @@
             const data = await res.json();
             const coords = provider.parse(data);
             if(coords){
-              const result = {...coords, provider:provider.name};
-              cache.set(query, result);
-              return result;
+              const lat = normalizeLatitude(coords.lat ?? coords.latitude);
+              const lon = normalizeLongitude(coords.lon ?? coords.lng ?? coords.longitude);
+              if(coordinatesLookValid(lat, lon)){
+                const result = {lat, lon, provider:provider.name};
+                cache.set(query, result);
+                return result;
+              }
             }
           }catch(err){
             console.warn(`Geocode provider ${provider.name} failed for ${query}`, err);
@@ -847,38 +1059,28 @@
       }
       async function geocodeMissing(){
         if(geocodeBusy) return;
-        const selectionSize = bulkSelectionSet.size;
         let targets = [];
         let usingSelection = false;
-        if(selectionSize){
-          targets = leads.map((l,idx)=>({l,idx})).filter(x=> bulkSelectionSet.has(x.l.__id) && !leadHasCoordinates(x.l));
-          if(targets.length){
-            usingSelection = true;
-          }
-        }
-        if(!targets.length){
-          targets = leads.map((l,idx)=>({l,idx})).filter(x=> !leadHasCoordinates(x.l));
-        }
-        if(!targets.length && selectedNeedsGeocode && selectedLeadId){
-          const idx = leads.findIndex(l=>l.__id===selectedLeadId);
-          if(idx!==-1) targets = [{l:leads[idx], idx}];
-        }
-        if(!targets.length){
-          if(selectionSize){
+        if(selectionActive){
+          targets = computeGeocodeTargets(leads, bulkSelectionSet);
+          usingSelection = true;
+          if(!targets.length){
             setGeocodeStatus("Selected leads already have coordinates.");
-          }else{
-            setGeocodeStatus("All leads already have coordinates.");
+            return;
           }
-          return;
+        }else{
+          targets = computeGeocodeTargets(leads);
+          if(!targets.length){
+            setGeocodeStatus("All leads already have coordinates.");
+            return;
+          }
         }
         setGeocodeBusy(true);
         setGeocodeStatus(usingSelection ? "Starting geocode for selected leads via OpenStreetMap…" : "Starting OpenStreetMap geocode run…");
         setGeocodeProgress({done:0,total:targets.length});
-        const updated=leads.slice();
-        let changed=false;
         let successCount=0, failCount=0, skippedCount=0;
         let lastProvider="";
-        const successIds=[];
+        const successes=[];
         for(let i=0;i<targets.length;i++){
           const {l,idx}=targets[i];
           const q=buildQueryFromLead(l);
@@ -891,13 +1093,11 @@
             const coords = await lookupCoords(q);
             if(coords){
               lastProvider = coords.provider || lastProvider;
-              const lat=Number(coords.lat ?? coords.latitude);
-              const lon=Number(coords.lon ?? coords.lng ?? coords.longitude);
-              if(Number.isFinite(lat) && Number.isFinite(lon)){
-                updated[idx]={...updated[idx], Latitude:lat, Longitude:lon};
-                changed=true;
+              const lat = normalizeLatitude(coords.lat ?? coords.latitude);
+              const lon = normalizeLongitude(coords.lon ?? coords.lng ?? coords.longitude);
+              if(coordinatesLookValid(lat, lon)){
+                successes.push({id: l.__id, lat, lon, provider: coords.provider || lastProvider || ""});
                 successCount++;
-                successIds.push(updated[idx].__id);
               }else{
                 failCount++;
               }
@@ -910,8 +1110,20 @@
           }
           setGeocodeProgress({done:i+1,total:targets.length});
         }
-        if(changed) setLeads(updated.slice());
-        if(changed && successIds.length){
+        if(successes.length){
+          const byId = new Map(successes.map(item=>[item.id, item]));
+          setLeads(prev=>{
+            let mutated=false;
+            const next = prev.map(lead=>{
+              const update = byId.get(lead.__id);
+              if(!update) return lead;
+              const applied = applyGeocodeResult(lead, update);
+              if(applied !== lead) mutated = true;
+              return applied;
+            });
+            return mutated ? next : prev;
+          });
+          const successIds = successes.map(item=>item.id);
           setBulkSelection(prev=>{
             const next = new Set(prev);
             let mutated=false;
@@ -938,6 +1150,7 @@
             <button className={tab==="leads"?"active":""} onClick={()=>setTab("leads")}>Leads</button>
             <button className={tab==="buyers"?"active":""} onClick={()=>setTab("buyers")}>Buyers</button>
           </div>
+          <div className="muted small mb-16">💾 All changes auto-save to this browser. Use the Load Sample buttons to restore the demo dataset.</div>
 
           {tab==="leads" ? (
             <>
@@ -1049,152 +1262,190 @@
                 </div>
 
                 <div className="card hview">
-                  <div className="hd">
-                    <div>🗺️ Map & Details</div>
-                    <div className="row small">
-                      <label><input type="checkbox" checked={mapEnabled} onChange={e=>setMapEnabled(e.target.checked)} /> Map</label>
-                      <label>Map Type:
-                        <select value={mapType} onChange={e=>setMapType(e.target.value)}>
-                          <option value="street">Street</option>
-                          <option value="satellite">Satellite</option>
-                        </select>
-                      </label>
-                    </div>
-                  </div>
                   <div className="scroll" style={{padding:"12px"}}>
                     {selectedLead ? (
                       <>
-                        <div style={{border:"1px solid var(--line)", borderRadius:"12px", overflow:"hidden", minHeight:"260px", background:"#fff", marginBottom:"12px"}}>
-                          {mapEnabled && mapURL
-                            ? <iframe title="map" src={mapURL} style={{border:0,width:"100%",height:"100%",minHeight:"260px"}} loading="lazy" referrerPolicy="no-referrer-when-downgrade"></iframe>
-                            : <div className="muted" style={{padding:"24px",textAlign:"center"}}>Provide coordinates to view map.</div>}
-                        </div>
+                        <details className="panel" open>
+                          <summary>🗺️ Map & Details</summary>
+                          <div className="panel-body">
+                            <div className="row small" style={{justifyContent:"flex-end", gap:"12px", marginBottom:"12px"}}>{
+                              <label><input type="checkbox" checked={mapEnabled} onChange={e=>setMapEnabled(e.target.checked)} /> Map</label>
+                              <label>Map Type:
+                                <select value={mapType} onChange={e=>setMapType(e.target.value)}>{
+                                  <option value="street">Street</option>
+                                  <option value="satellite">Satellite</option>
+                                </select>
+                              </label>
+                            </div>
+                            <div style={{border:"1px solid var(--line)", borderRadius:"12px", overflow:"hidden", minHeight:"260px", background:"#fff", marginBottom:"12px"}}>{
+                              mapEnabled && mapURL
+                                ? <iframe title="map" src={mapURL} style={{border:0,width:"100%",height:"100%",minHeight:"260px"}} loading="lazy" referrerPolicy="no-referrer-when-downgrade"></iframe>
+                                : <div className="muted" style={{padding:"24px",textAlign:"center"}}>Provide coordinates to view map.</div>
+                            }</div>
+                            <div style={{display:"grid", gap:"12px", gridTemplateColumns:"repeat(auto-fit, minmax(180px, 1fr))"}}>{
+                              <Info label="Owner" value={selectedLead?.["Owner Name"]} />
+                              <Info label="County" value={selectedLead?.["County"]} />
+                              <Info label="Address" value={selectedLead?.["Site Address"]} />
+                              <Info label="APN" value={selectedLead?.["APN"]} />
+                              <Info label="Acreage" value={selectedLead?.["Acreage"]} />
+                              <Info label="Est. Value" value={selectedLead?.["Estimated Market Value"]} />
+                              <Info label="Latitude" value={String(selectedLead?.["Latitude"] ?? "")} />
+                              <Info label="Longitude" value={String(selectedLead?.["Longitude"] ?? "")} />
+                            }</div>
+                          </div>
+                        </details>
 
-                        <div className="row-details" style={{marginBottom:"16px"}}>
-                          <Info label="Owner" value={selectedLead?.["Owner Name"]} />
-                          <Info label="County" value={selectedLead?.["County"]} />
-                          <Info label="Address" value={selectedLead?.["Site Address"]} />
-                          <Info label="APN" value={selectedLead?.["APN"]} />
-                          <Info label="Acreage" value={selectedLead?.["Acreage"]} />
-                          <Info label="Est. Value" value={selectedLead?.["Estimated Market Value"]} />
-                          <Info label="Latitude" value={String(selectedLead?.["Latitude"] ?? "")} />
-                          <Info label="Longitude" value={String(selectedLead?.["Longitude"] ?? "")} />
-                        </div>
+                        <details className="panel">
+                          <summary>📞 Contact Details</summary>
+                          <div className="panel-body">
+                            {selectedLeadHasDNC ? (
+                              <div className="muted" style={{color:"#b91c1c", fontWeight:600, marginBottom:"8px"}}>DNC flagged. Respect do-not-contact preferences.</div>
+                            ) : null}
+                            <div style={{display:"grid", gap:"12px", gridTemplateColumns:"repeat(auto-fit, minmax(240px, 1fr))"}}>{
+                              <div>{
+                                <div className="muted" style={{fontSize:"11px", textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:"6px"}}>Phones</div>
+                                {selectedLeadPhones.length ? (
+                                  <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>{
+                                    {selectedLeadPhones.map(phone=>(
+                                      <div key={`${phone.field}-${phone.href}`} className="contact-item">{
+                                        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>{
+                                          <span style={{fontWeight:600}}>{phone.value}</span>
+                                          <div>{
+                                            {phone.isPrimary && <span className="badge primary">Primary</span>}
+                                            {phone.isDNC && <span className="badge danger">DNC</span>}
+                                          }</div>
+                                        }</div>
+                                        <div className="muted" style={{fontSize:"11px", marginTop:"4px"}}>{phone.field}</div>
+                                        <div className="contact-actions">{
+                                          <a className="btn ghost" href={`tel:${phone.href}`}>Call</a>
+                                          <a className="btn ghost" href={`sms:${phone.href}`}>Text</a>
+                                          <button className="btn ghost" type="button" onClick={()=>copyToClipboard(phone.value)}>Copy</button>
+                                        }</div>
+                                      }</div>
+                                    ))}
+                                  }</div>
+                                ) : (
+                                  <div className="muted small">No phone numbers yet.</div>
+                                )}
+                              }</div>
+                              <div>{
+                                <div className="muted" style={{fontSize:"11px", textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:"6px"}}>Emails</div>
+                                {selectedLeadEmails.length ? (
+                                  <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>{
+                                    {selectedLeadEmails.map(email=>(
+                                      <div key={`${email.field}-${email.value}`} className="contact-item">{
+                                        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>{
+                                          <span style={{fontWeight:600}}>{email.value}</span>
+                                          {email.isPrimary && <span className="badge primary">Primary</span>}
+                                        }</div>
+                                        <div className="muted" style={{fontSize:"11px", marginTop:"4px"}}>{email.field}</div>
+                                        <div className="contact-actions">{
+                                          <a className="btn ghost" href={`mailto:${encodeURIComponent(email.value)}`}>Email</a>
+                                          <button className="btn ghost" type="button" onClick={()=>copyToClipboard(email.value)}>Copy</button>
+                                        }</div>
+                                      }</div>
+                                    ))}
+                                  }</div>
+                                ) : (
+                                  <div className="muted small">No emails yet.</div>
+                                )}
+                              }</div>
+                            }</div>
+                          </div>
+                        </details>
 
-                        <div style={{borderTop:"1px solid var(--line)", paddingTop:"12px", marginBottom:"16px"}}>
-                          <div style={{fontWeight:600, marginBottom:"8px"}}>📞 Contact Details</div>
-                          <div style={{display:"grid", gap:"12px", gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))"}}>
-                            <div>
-                              <div className="muted" style={{fontSize:"11px", textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:"6px"}}>Phone</div>
-                              {selectedLeadPhones.length ? (
-                                <div style={{display:"flex", flexDirection:"column", gap:"6px"}}>
-                                  {selectedLeadPhones.map(phone=>(
-                                    <a key={`${phone.label}-${phone.href}`} className="btn ghost" href={`tel:${phone.href}`}
-                                      style={{textDecoration:"none", display:"flex", justifyContent:"space-between", alignItems:"center"}}>
-                                      <span>{phone.display}</span>
-                                      <span className="muted" style={{fontSize:"11px"}}>{phone.label}</span>
-                                    </a>
+                        <details className="panel">
+                          <summary>✉️ Communication History</summary>
+                          <div className="panel-body">
+                            <div className="row mb-8" style={{gap:"8px"}}>{
+                              {["New","Attempted","Contacted","Offer Sent","Under Contract","Dead"].map(s=>(
+                                <span key={s} className={"chip "+(selectedLead?.Status===s?"active":"")} onClick={()=>{
+                                  if(!selectedLeadId) return;
+                                  updateLeadById(selectedLeadId, current=>{
+                                    if(current.Status===s) return current;
+                                    const baseHistory = Array.isArray(current.__log) ? current.__log.slice() : Array.isArray(current.__history) ? current.__history.slice() : [];
+                                    const entry = makeHistoryEntry("Status", `Status changed to ${s}`);
+                                    baseHistory.unshift(entry);
+                                    return {...current, Status:s, __history:baseHistory, __log:baseHistory};
+                                  });
+                                }}>{s}</span>
+                              ))}
+                            }</div>
+                            <div className="row mb-8">{
+                              <input className="input" placeholder="Next Action (e.g., Call Tue 10am)" value={selectedLead?.__nextAction||""}
+                                onChange={e=>{ if(!selectedLeadId) return; updateLeadById(selectedLeadId, current=>({...current,__nextAction:e.target.value})); }} />
+                              <input type="date" value={selectedLead?.__lastContacted||""}
+                                onChange={e=>{ if(!selectedLeadId) return; updateLeadById(selectedLeadId, current=>({...current,__lastContacted:e.target.value})); }} />
+                            }</div>
+                            {selectedLead?.__notes ? (
+                              <div className="mb-8" style={{background:"#f1f5f9", borderRadius:"12px", padding:"12px"}}>{
+                                <div className="muted" style={{fontSize:"11px", textTransform:"uppercase", letterSpacing:"0.05em"}}>Pinned Note</div>
+                                <div style={{whiteSpace:"pre-wrap", marginTop:"4px"}}>{selectedLead.__notes}</div>
+                              }</div>
+                            ) : null}
+
+                            <div className="row mt-16 mb-8" style={{alignItems:"center", justifyContent:"space-between"}}>{
+                              <div style={{fontWeight:600}}>🤝 Assign to Buyer</div>
+                              {assignedBuyer && <div className="muted" style={{fontSize:"12px"}}>Assigned to: {buyerLabel(assignedBuyer)}</div>}
+                            }</div>
+                            <div className="row mb-8" style={{alignItems:"center"}}>{
+                              <select value={selectedLead?.__assignedBuyerId||""} onChange={e=>handleAssignBuyer(selectedLead, e.target.value)} style={{minWidth:"200px"}}>{
+                                <option value="">Unassigned</option>
+                                {buyers.map(b=>(<option key={b.__id} value={b.__id}>{buyerLabel(b)}</option>))}
+                              </select>
+                            }</div>
+                            {matchingBuyers.length ? (
+                              <div className="mb-8">{
+                                <div className="muted" style={{fontSize:"12px", marginBottom:"4px"}}>Suggested buyers (click to assign)</div>
+                                <div className="row" style={{gap:"8px"}}>{
+                                  {matchingBuyers.slice(0,6).map(b=>(
+                                    <span key={b.__id} className={"chip "+(selectedLead?.__assignedBuyerId===b.__id?"active":"")} onClick={()=>handleAssignBuyer(selectedLead, b.__id)}>{buyerLabel(b)}</span>
                                   ))}
-                                </div>
-                              ) : (
-                                <div className="muted small">No phone numbers yet.</div>
-                              )}
-                            </div>
-                            <div>
-                              <div className="muted" style={{fontSize:"11px", textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:"6px"}}>Email</div>
-                              {selectedLeadEmails.length ? (
-                                <div style={{display:"flex", flexDirection:"column", gap:"6px"}}>
-                                  {selectedLeadEmails.map(email=>(
-                                    <a key={`${email.label}-${email.value}`} className="btn ghost" href={`mailto:${encodeURIComponent(email.value)}`}
-                                      style={{textDecoration:"none", display:"flex", justifyContent:"space-between", alignItems:"center"}}>
-                                      <span>{email.value}</span>
-                                      <span className="muted" style={{fontSize:"11px"}}>{email.label}</span>
-                                    </a>
-                                  ))}
-                                </div>
-                              ) : (
-                                <div className="muted small">No emails yet.</div>
-                              )}
-                            </div>
-                          </div>
-                        </div>
+                                }</div>
+                              }</div>
+                            ) : null}
 
-                        <div style={{borderTop:"1px solid var(--line)", paddingTop:"12px"}}>
-                          <div className="row mb-8">
-                            {["New","Attempted","Contacted","Offer Sent","Under Contract","Dead"].map(s=>(
-                              <span key={s} className={"chip "+(selectedLead?.Status===s?"active":"")} onClick={()=>{
-                                if(!selectedLeadId) return;
-                                updateLeadById(selectedLeadId, current=>{
-                                  if(current.Status===s) return current;
-                                  const entry = makeHistoryEntry("Status", `Status changed to ${s}`);
-                                  return {...current, Status:s, __history:[entry,...(current.__history||[])]};
-                                });
-                              }}>{s}</span>
-                            ))}
+                            <div className="row mt-16 mb-8" style={{justifyContent:"space-between", alignItems:"center"}}>{
+                              <div style={{fontWeight:600}}>📝 History Log</div>
+                            }</div>
+                            <HistoryLog
+                              entries={selectedLead?.__log || selectedLead?.__history || []}
+                              type={leadLogType}
+                              text={leadLogText}
+                              date={leadLogDate}
+                              onTypeChange={setLeadLogType}
+                              onTextChange={setLeadLogText}
+                              onDateChange={setLeadLogDate}
+                              onAdd={handleAddLeadHistory}
+                              onDelete={handleDeleteLeadHistory}
+                              placeholder="Add call notes, offer details, or follow-up tasks"
+                              types={["Call","Text","Email","Note"]}
+                            />
                           </div>
-                          <div className="row mb-8">
-                            <input className="input" placeholder="Next Action (e.g., Call Tue 10am)" value={selectedLead?.__nextAction||""}
-                              onChange={e=>{ if(!selectedLeadId) return; updateLeadById(selectedLeadId, current=>({...current,__nextAction:e.target.value})); }} />
-                            <input type="date" value={selectedLead?.__lastContacted||""}
-                              onChange={e=>{ if(!selectedLeadId) return; updateLeadById(selectedLeadId, current=>({...current,__lastContacted:e.target.value})); }} />
-                          </div>
-                          {selectedLead?.__notes ? (
-                            <div className="mb-8" style={{background:"#f1f5f9", borderRadius:"12px", padding:"12px"}}>
-                              <div className="muted" style={{fontSize:"11px", textTransform:"uppercase", letterSpacing:"0.05em"}}>Pinned Note</div>
-                              <div style={{whiteSpace:"pre-wrap", marginTop:"4px"}}>{selectedLead.__notes}</div>
-                            </div>
-                          ) : null}
+                        </details>
 
-                          <div className="row mt-16 mb-8" style={{alignItems:"center", justifyContent:"space-between"}}>
-                            <div style={{fontWeight:600}}>🤝 Assign to Buyer</div>
-                            {assignedBuyer && <div className="muted" style={{fontSize:"12px"}}>Assigned to: {buyerLabel(assignedBuyer)}</div>}
-                          </div>
-                          <div className="row mb-8" style={{alignItems:"center"}}>
-                            <select value={selectedLead?.__assignedBuyerId||""} onChange={e=>handleAssignBuyer(selectedLead, e.target.value)} style={{minWidth:"200px"}}>
-                              <option value="">Unassigned</option>
-                              {buyers.map(b=>(<option key={b.__id} value={b.__id}>{buyerLabel(b)}</option>))}
-                            </select>
-                          </div>
-                          {matchingBuyers.length ? (
-                            <div className="mb-8">
-                              <div className="muted" style={{fontSize:"12px", marginBottom:"4px"}}>Suggested buyers (click to assign)</div>
-                              <div className="row" style={{gap:"8px"}}>
-                                {matchingBuyers.slice(0,6).map(b=>(
-                                  <span key={b.__id} className={"chip "+(selectedLead?.__assignedBuyerId===b.__id?"active":"")} onClick={()=>handleAssignBuyer(selectedLead, b.__id)}>{buyerLabel(b)}</span>
-                                ))}
-                              </div>
-                            </div>
-                          ) : null}
-
-                          <div className="row mt-16 mb-8" style={{justifyContent:"space-between", alignItems:"center"}}>
-                            <div style={{fontWeight:600}}>📝 History Log</div>
-                          </div>
-                          <HistoryLog entries={selectedLead?.__history||[]} type={leadLogType} text={leadLogText}
-                            onTypeChange={setLeadLogType} onTextChange={setLeadLogText}
-                            onAdd={handleAddLeadHistory} onDelete={handleDeleteLeadHistory}
-                            placeholder="Add call notes, offer details, or follow-up tasks" />
-
-                          <div className="row mt-16 mb-8" style={{justifyContent:"space-between"}}>
-                            <div style={{fontWeight:600}}>📌 Nearby Comps</div>
-                            <div className="row small">
+                        <details className="panel">
+                          <summary>📌 Nearby Comps</summary>
+                          <div className="panel-body">
+                            <div className="row small" style={{justifyContent:"flex-end", marginBottom:"12px"}}>{
                               <span>Radius (miles)</span>
                               <input className="w-20" type="number" min="1" step="1" value={compRadius}
                                 onChange={e=>setCompRadius(Math.max(1, Number(e.target.value)||1))}/>
-                            </div>
+                            }</div>
+                            {comps.length ? (
+                              <div className="table-lite">{
+                                <table>
+                                  <thead><tr><th>Dist (mi)</th><th>Owner</th><th>Address</th><th>County</th><th>Est. Value</th><th>Acreage</th></tr></thead>
+                                  <tbody>{
+                                    {comps.map((c,i)=>(
+                                      <tr key={i}><td>{c.distance.toFixed(2)}</td><td>{c.owner}</td><td>{c.address}</td><td>{c.county}</td><td>{c.value||"—"}</td><td>{c.acreage||"—"}</td></tr>
+                                    ))}
+                                  }</tbody>
+                                </table>
+                              }</div>
+                            ) : <div className="muted">No comps found within {compRadius} miles.</div> }
                           </div>
-                          {comps.length ? (
-                            <div className="table-lite">
-                              <table>
-                                <thead><tr><th>Dist (mi)</th><th>Owner</th><th>Address</th><th>County</th><th>Est. Value</th><th>Acreage</th></tr></thead>
-                                <tbody>
-                                  {comps.map((c,i)=>(
-                                    <tr key={i}><td>{c.distance.toFixed(2)}</td><td>{c.owner}</td><td>{c.address}</td><td>{c.county}</td><td>{c.value||"—"}</td><td>{c.acreage||"—"}</td></tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          ) : <div className="muted">No comps found within {compRadius} miles.</div> }
-                        </div>
+                        </details>
                       </>
                     ) : (
                       <div className="muted" style={{padding:"24px", textAlign:"center"}}>Select a lead from the table to view details.</div>
@@ -1234,7 +1485,13 @@
                   setBuyers(sample);
                   setSelectedBuyerId(sample[0]?.__id || null);
                 }}>Load Sample</button>
+                <button className="btn indigo" onClick={handleMatchSelectedLead}>Match To Selected Lead</button>
+                <button className="btn ghost" onClick={handleClearLeadMatch}>Clear Lead Match</button>
               </div>
+
+              {buyerStatus ? (
+                <div className="muted" style={{marginTop:"-8px", marginBottom:"8px"}}>{buyerStatus}</div>
+              ) : null}
 
 
               <div className="grid grid-2">
@@ -1299,10 +1556,19 @@
 
                         <div className="mt-16">
                           <div style={{fontWeight:600}} className="mb-8">📝 History Log</div>
-                          <HistoryLog entries={selectedBuyer.__history||[]} type={buyerLogType} text={buyerLogText}
-                            onTypeChange={setBuyerLogType} onTextChange={setBuyerLogText}
-                            onAdd={handleAddBuyerHistory} onDelete={handleDeleteBuyerHistory}
-                            placeholder="Add call notes, funding updates, or deal progress" />
+                          <HistoryLog
+                            entries={selectedBuyer.__log || selectedBuyer.__history || []}
+                            type={buyerLogType}
+                            text={buyerLogText}
+                            date={buyerLogDate}
+                            onTypeChange={setBuyerLogType}
+                            onTextChange={setBuyerLogText}
+                            onDateChange={setBuyerLogDate}
+                            onAdd={handleAddBuyerHistory}
+                            onDelete={handleDeleteBuyerHistory}
+                            placeholder="Add call notes, funding updates, or deal progress"
+                            types={["Call","Text","Email","Note"]}
+                          />
                         </div>
                       </div>
                     ) : <div className="muted" style={{padding:"24px"}}>No buyer selected.</div>}
@@ -1343,7 +1609,7 @@
     }
 
 
-    function HistoryLog({entries, type, text, onTypeChange, onTextChange, onAdd, onDelete, placeholder}){
+    function HistoryLog({entries, type, text, date, onTypeChange, onTextChange, onDateChange, onAdd, onDelete, placeholder, types}){
       const sorted = React.useMemo(()=>{
         if(!Array.isArray(entries)) return [];
         return entries.slice().sort((a,b)=>{
@@ -1352,14 +1618,19 @@
           return (Number.isFinite(ta)?ta:0)-(Number.isFinite(tb)?tb:0);
         });
       },[entries]);
+      const options = Array.isArray(types) && types.length ? types : HISTORY_TYPES;
       return (
         <div>
           <div className="row mb-8" style={{alignItems:"flex-start"}}>
             <select value={type} onChange={e=>onTypeChange?.(e.target.value)} style={{minWidth:"140px"}}>
-              {HISTORY_TYPES.map(opt=><option key={opt} value={opt}>{opt}</option>)}
+              {options.map(opt=><option key={opt} value={opt}>{opt}</option>)}
             </select>
             <textarea className="note" style={{flex:1, height:"72px"}} placeholder={placeholder||"Add note"} value={text||""}
               onChange={e=>onTextChange?.(e.target.value)}></textarea>
+            <div style={{display:"flex", flexDirection:"column", gap:"4px"}}>
+              <label className="muted" style={{fontSize:"11px"}}>Next action date</label>
+              <input type="date" value={date||""} onChange={e=>onDateChange?.(e.target.value)} />
+            </div>
             <button className="btn indigo" onClick={onAdd} disabled={!String(text||"").trim()}>Log</button>
           </div>
           <div style={{maxHeight:"220px", overflow:"auto", border:"1px solid var(--line)", borderRadius:"12px", padding:"8px", background:"#fff"}}>
@@ -1372,6 +1643,7 @@
                     <div className="muted" style={{fontSize:"11px"}}>{dateLabel}</div>
                   </div>
                   <div style={{whiteSpace:"pre-wrap"}}>{entry.note||"—"}</div>
+                  {entry.nextActionDate ? <div className="muted" style={{fontSize:"11px", marginTop:"4px"}}>Next action: {entry.nextActionDate}</div> : null}
                   {onDelete && (
                     <div className="row" style={{justifyContent:"flex-end", marginTop:"6px"}}>
                       <button className="btn ghost" style={{padding:"4px 8px", fontSize:"12px"}} onClick={()=>onDelete(entry.id)}>Remove</button>

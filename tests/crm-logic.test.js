@@ -9,8 +9,14 @@ const {
   cleanBuyerRecord,
   cleanLeadRecord,
   makeHistoryEntry,
+  asNumber,
   normalizeCoordinate,
+  normalizeLatitude,
+  normalizeLongitude,
   leadHasCoordinates,
+  hasCoords,
+  needsCoords,
+  computeGeocodeTargets,
   buildGeocodeQuery,
   sanitizeHistory,
   sampleBuyers,
@@ -24,7 +30,7 @@ const {
 test('sanitizeHistory normalizes primitive entries', () => {
   const entries = sanitizeHistory([
     'Called and left voicemail',
-    { type: 'Call', note: 'Reached seller', timestamp: '2024-01-01T00:00:00.000Z', id: 'persisted' }
+    { type: 'Call', note: 'Reached seller', timestamp: '2024-01-01T00:00:00.000Z', id: 'persisted', nextActionDate: '2024-01-05' }
   ]);
   assert.equal(entries.length, 2);
   assert.equal(entries[0].type, 'Note');
@@ -35,6 +41,7 @@ test('sanitizeHistory normalizes primitive entries', () => {
   assert.equal(entries[1].note, 'Reached seller');
   assert.equal(entries[1].id, 'persisted');
   assert.equal(entries[1].timestamp, '2024-01-01T00:00:00.000Z');
+  assert.equal(entries[1].nextActionDate, '2024-01-05');
 });
 
 test('cleanLeadRecord fills defaults and preserves identifiers', () => {
@@ -51,20 +58,29 @@ test('cleanLeadRecord fills defaults and preserves identifiers', () => {
   assert.equal(normalized.Latitude, 28.5);
   assert.equal(normalized.Longitude, -82.4);
   assert.ok(Array.isArray(normalized.__history));
+  assert.ok(Array.isArray(normalized.__log));
   assert.equal(normalized.__history.length, 1);
+  assert.equal(normalized.__log.length, 1);
+  assert.strictEqual(normalized.__history, normalized.__log);
   assert.ok(normalized.__history[0].id);
   assert.equal(normalized.__history[0].type, 'Note');
 });
 
-test('normalizeCoordinate and leadHasCoordinates handle string inputs safely', () => {
+test('normalizeCoordinate variants and leadHasCoordinates handle inputs safely', () => {
   assert.equal(normalizeCoordinate(' 28.1234 '), 28.1234);
   assert.equal(normalizeCoordinate('-82.501 '), -82.501);
   assert.equal(normalizeCoordinate(''), undefined);
   assert.equal(normalizeCoordinate(' - '), undefined);
+  assert.equal(normalizeLatitude('91'), undefined);
+  assert.equal(normalizeLatitude('-91.1'), undefined);
+  assert.equal(normalizeLongitude('181'), undefined);
+  assert.equal(normalizeLongitude('-181'), undefined);
   const lead = { Latitude: '28.9723', Longitude: '-82.4891' };
   assert.equal(leadHasCoordinates(lead), true);
   const missing = { Latitude: '', Longitude: null };
   assert.equal(leadHasCoordinates(missing), false);
+  const zeroed = { Latitude: '0', Longitude: '0' };
+  assert.equal(leadHasCoordinates(zeroed), false);
 });
 
 test('buildGeocodeQuery assembles address fallbacks', () => {
@@ -97,6 +113,8 @@ test('cleanBuyerRecord keeps ids and normalizes history', () => {
   assert.equal(normalized.__id, 'buyer-1');
   assert.equal(normalized.__notes, '');
   assert.ok(Array.isArray(normalized.__history));
+  assert.ok(Array.isArray(normalized.__log));
+  assert.strictEqual(normalized.__history, normalized.__log);
   assert.equal(normalized.__history[0].type, 'Note');
   assert.ok(normalized.__history[0].id);
 });
@@ -105,6 +123,40 @@ test('toNumber strips currency characters safely', () => {
   assert.equal(toNumber('$12,345.67'), 12345.67);
   assert.equal(toNumber('  5000  '), 5000);
   assert.equal(toNumber(null), undefined);
+});
+
+test('asNumber trims placeholders and converts values', () => {
+  assert.equal(asNumber(' 28.75 '), 28.75);
+  assert.equal(asNumber('—'), undefined);
+  assert.equal(asNumber('NA'), undefined);
+  assert.equal(asNumber('null'), undefined);
+  assert.equal(asNumber('0'), 0);
+  assert.equal(asNumber('$1,200.55'), 1200.55);
+});
+
+test('hasCoords and needsCoords respect normalization guards', () => {
+  const withCoords = { Latitude: '28.5', Longitude: '-82.4' };
+  assert.equal(hasCoords(withCoords), true);
+  assert.equal(needsCoords(withCoords), false);
+  const withoutCoords = { Latitude: '—', Longitude: '' };
+  assert.equal(hasCoords(withoutCoords), false);
+  assert.equal(needsCoords(withoutCoords), true);
+  const outOfRange = { Latitude: '120', Longitude: '50' };
+  assert.equal(hasCoords(outOfRange), false);
+});
+
+test('computeGeocodeTargets respects selection and missing coordinates', () => {
+  const leads = [
+    cleanLeadRecord({ __id: 'a', Latitude: '28.5', Longitude: '-82.4' }),
+    cleanLeadRecord({ __id: 'b', Latitude: '', Longitude: '' }),
+    cleanLeadRecord({ __id: 'c', Latitude: '—', Longitude: '—' })
+  ];
+  const allTargets = computeGeocodeTargets(leads);
+  assert.equal(allTargets.length, 2);
+  assert.deepEqual(allTargets.map(t => t.l.__id), ['b', 'c']);
+  const selectedTargets = computeGeocodeTargets(leads, new Set(['a', 'b']));
+  assert.equal(selectedTargets.length, 1);
+  assert.equal(selectedTargets[0].l.__id, 'b');
 });
 
 test('OpenStreetMap provider is configured with throttle and parsing', () => {
@@ -160,11 +212,48 @@ test('geocodeWithNominatim fetches and parses coordinates', async () => {
   assert.equal(called, 1);
 });
 
+test('geocodeWithNominatim filters placeholder coordinates', async () => {
+  const fakeFetch = async () => ({
+    ok: true,
+    async json(){
+      return [{ lat: '0', lon: '0' }];
+    }
+  });
+  const coords = await geocodeWithNominatim('Any query', fakeFetch);
+  assert.equal(coords, null);
+});
+
+test('applyGeocodeResult updates coordinates and logs provider', () => {
+  const lead = cleanLeadRecord({
+    __id: 'lead-geo',
+    Latitude: '',
+    Longitude: '',
+    __history: [makeHistoryEntry('Note', 'Original')]
+  });
+  const updated = applyGeocodeResult(lead, { lat: '28.501', lon: '-82.401', provider: 'OpenStreetMap' });
+  assert.notEqual(updated, lead);
+  assert.equal(updated.Latitude, 28.501);
+  assert.equal(updated.Longitude, -82.401);
+  assert.ok(Array.isArray(updated.__history));
+  assert.ok(Array.isArray(updated.__log));
+  assert.strictEqual(updated.__history, updated.__log);
+  assert.equal(updated.__history[0].type, 'Status');
+  assert.equal(updated.__history[0].note, 'Coordinates verified via OpenStreetMap');
+  const repeated = applyGeocodeResult(updated, { lat: 28.501, lon: -82.401, provider: 'OpenStreetMap' });
+  assert.equal(repeated, updated);
+});
+
 test('sample data hydrates into clean records', () => {
   const hydratedLeads = sampleLeads.map(cleanLeadRecord);
   const hydratedBuyers = sampleBuyers.map(cleanBuyerRecord);
   assert.ok(hydratedLeads.length > 0);
-  assert.ok(hydratedLeads.every(lead => Array.isArray(lead.__history) && lead.__history.every(entry => entry.id && entry.timestamp)));
+  assert.ok(hydratedLeads.every(lead => Array.isArray(lead.__history)
+    && Array.isArray(lead.__log)
+    && lead.__history === lead.__log
+    && lead.__history.every(entry => entry.id && entry.timestamp)));
   assert.ok(hydratedBuyers.length > 0);
-  assert.ok(hydratedBuyers.every(buyer => Array.isArray(buyer.__history) && buyer.__history.every(entry => entry.id && entry.timestamp)));
+  assert.ok(hydratedBuyers.every(buyer => Array.isArray(buyer.__history)
+    && Array.isArray(buyer.__log)
+    && buyer.__history === buyer.__log
+    && buyer.__history.every(entry => entry.id && entry.timestamp)));
 });
