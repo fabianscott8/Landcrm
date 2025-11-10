@@ -91,7 +91,7 @@ test('buildGeocodeQuery assembles address fallbacks', () => {
     Zip: '34470',
     County: 'Marion'
   };
-  assert.equal(buildGeocodeQuery(lead), '123 Main St, Ocala, FL, 34470, Marion County');
+  assert.equal(buildGeocodeQuery(lead), '123 Main St, Marion County, Ocala, FL, 34470');
   const fallback = {
     'Site Address': '',
     'Street Address': '456 Pine Ave',
@@ -103,6 +103,14 @@ test('buildGeocodeQuery assembles address fallbacks', () => {
   assert.equal(buildGeocodeQuery(fallback), '456 Pine Ave, Ocala, FL, 34470');
   const ownerOnly = { 'Owner Name': 'Sample Owner' };
   assert.equal(buildGeocodeQuery(ownerOnly), 'Sample Owner');
+  const embedded = {
+    'Site Address': '789 Oak Rd, Citrus Springs, FL 34433',
+    County: 'Citrus',
+    City: 'Citrus Springs',
+    State: 'FL',
+    Zip: '34433'
+  };
+  assert.equal(buildGeocodeQuery(embedded), '789 Oak Rd, Citrus Springs, FL 34433, Citrus County');
 });
 
 test('cleanBuyerRecord keeps ids and normalizes history', () => {

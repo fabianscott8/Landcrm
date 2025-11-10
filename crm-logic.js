@@ -115,29 +115,63 @@
     const base = (selectedSet && selectedSet.size) ? list.filter(l=>selectedSet.has(l.__id)) : list;
     return base.map((l, idx)=>({l, idx})).filter(({l})=>needsCoords(l));
   };
+  const normalizeCountyName = (value)=>{
+    const clean = stripPlaceholderText(value);
+    if(!clean) return '';
+    return clean.toLowerCase().includes('county') ? clean : `${clean} County`;
+  };
+  const addPart = (parts, value)=>{
+    const clean = stripPlaceholderText(value);
+    if(!clean) return;
+    const lower = clean.toLowerCase();
+    if(parts.some(part=>part.toLowerCase() === lower)) return;
+    parts.push(clean);
+  };
+  const valueIncludes = (source, needle)=>{
+    if(!source || !needle) return false;
+    return source.toLowerCase().includes(needle.toLowerCase());
+  };
   const buildGeocodeQuery = (l)=>{
     if(!l) return '';
-    const siteCity = l["City"] || l["Site City"];
-    const siteState = l["State"] || l["Site State"];
-    const siteZip = l["Zip"] || l["Site Zip"];
-    const cityState = [siteCity, siteState].filter(Boolean).join(', ');
-    if(l["Site Address"]){
-      const parts = [l["Site Address"]];
-      if(cityState) parts.push(cityState);
-      if(siteZip) parts.push(siteZip);
-      if(l["County"]) parts.push(`${l["County"]} County`);
+    const siteAddress = stripPlaceholderText(l["Site Address"]);
+    const mailingAddress = stripPlaceholderText(l["Street Address"]);
+    const county = normalizeCountyName(l["County"]);
+    const city = stripPlaceholderText(l["City"] || l["Site City"]);
+    const state = stripPlaceholderText(l["State"] || l["Site State"]);
+    const zip = stripPlaceholderText(l["Zip"] || l["Site Zip"]);
+    const address = siteAddress || mailingAddress;
+    if(address){
+      const parts = [];
+      addPart(parts, address);
+      if(county && !valueIncludes(address, county)){ addPart(parts, county); }
+      const addressHasCity = valueIncludes(address, city);
+      const addressHasState = valueIncludes(address, state);
+      if(city && state){
+        if(!(addressHasCity && addressHasState)){
+          addPart(parts, `${city}, ${state}`);
+        }
+      }else{
+        if(city && !addressHasCity) addPart(parts, city);
+        if(state && !addressHasState) addPart(parts, state);
+      }
+      if(zip && !valueIncludes(address, zip)) addPart(parts, zip);
       return parts.join(', ');
     }
-    const mailingParts = [l["Street Address"], cityState, siteZip].filter(Boolean);
-    if(mailingParts.length){
-      if(l["County"]){
-        mailingParts.push(`${l["County"]} County`);
-      }
-      return mailingParts.join(', ');
+    const parts = [];
+    if(city && state){
+      addPart(parts, `${city}, ${state}`);
+    }else{
+      addPart(parts, city);
+      addPart(parts, state);
     }
-    const apn = String(l["APN"]||'').trim();
+    addPart(parts, zip);
+    addPart(parts, county);
+    if(parts.length){
+      return parts.join(', ');
+    }
+    const apn = stripPlaceholderText(l["APN"]);
     if(apn) return apn;
-    return String(l["Owner Name"]||'').trim();
+    return stripPlaceholderText(l["Owner Name"]);
   };
   function applyGeocodeResult(lead, coords){
     if(!lead || typeof lead !== 'object') return lead;
