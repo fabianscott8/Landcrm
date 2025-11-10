@@ -310,21 +310,27 @@
         const value = String(lead[field] ?? "").trim().toLowerCase();
         return value && DNC_VALUES.has(value);
       }));
-      const seen = new Set();
+      const seen = new Map();
       const entries = [];
       PHONE_FIELDS.forEach((field)=>{
         const raw = lead[field];
         const value = typeof raw === "number" ? String(raw) : String(raw ?? "").trim();
         if(!value || value === "—") return;
         const href = normalizePhoneHref(value);
-        if(!href || seen.has(href)) return;
-        seen.add(href);
         const dncField = PHONE_FIELD_TO_DNC.get(field);
+        const isDNC = dncField ? dncs.has(dncField) : false;
+        if(!href) return;
+        const existingIndex = seen.get(href);
+        if(existingIndex !== undefined){
+          if(isDNC) entries[existingIndex].isDNC = true;
+          return;
+        }
+        seen.set(href, entries.length);
         entries.push({
           field,
           value,
           href,
-          isDNC: dncField ? dncs.has(dncField) : false,
+          isDNC,
         });
       });
       return entries.map((entry, index)=>({
