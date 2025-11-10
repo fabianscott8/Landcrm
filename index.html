@@ -276,22 +276,6 @@
       "Cell","Cell 2","Landline","Landline 2","Phone 1","Phone 2",
       "Phone","Cell 3","Landline 3","Landline 4","Phone 3","Other Phone","Primary Phone","Secondary Phone"
     ];
-    const PHONE_FIELD_TO_DNC = new Map([
-      ["Cell","DNC"],
-      ["Cell 2","DNC 2"],
-      ["Cell 3","DNC 3"],
-      ["Landline","DNC"],
-      ["Landline 2","DNC 2"],
-      ["Landline 3","DNC 3"],
-      ["Landline 4","DNC 4"],
-      ["Phone","DNC"],
-      ["Phone 1","DNC"],
-      ["Phone 2","DNC 2"],
-      ["Phone 3","DNC 3"],
-      ["Other Phone","DNC 4"],
-      ["Primary Phone","DNC"],
-      ["Secondary Phone","DNC 2"]
-    ]);
     const DNC_FIELDS = ["DNC","DNC 2","DNC 3","DNC 4"];
     const EMAIL_FIELDS = ["Email","Email 1","Email 2","Email 3","Primary Email","Secondary Email"];
     const DNC_VALUES = new Set(["yes","y","true","1","dnc","do not call","do-not-call"]);
@@ -319,12 +303,11 @@
         const href = normalizePhoneHref(value);
         if(!href || seen.has(href)) return;
         seen.add(href);
-        const dncField = PHONE_FIELD_TO_DNC.get(field);
         entries.push({
           field,
           value,
           href,
-          isDNC: dncField ? dncs.has(dncField) : false,
+          isDNC: dncs.size > 0,
         });
       });
       return entries.map((entry, index)=>({
@@ -922,6 +905,7 @@
       // Geocode
       const bulkSelectionSet = useMemo(()=> new Set(bulkSelection), [bulkSelection]);
       const selectionActive = bulkSelectionSet.size > 0;
+      const bulkSelectedCount = bulkSelectionSet.size;
       const missingCount = useMemo(()=> computeGeocodeTargets(leads).length, [leads]);
       const bulkSelectedMissingCount = useMemo(()=>{
         if(!selectionActive) return 0;
@@ -1285,21 +1269,23 @@
                         <details className="panel" open>
                           <summary>🗺️ Map & Details</summary>
                           <div className="panel-body">
-                            <div className="row small" style={{justifyContent:"flex-end", gap:"12px", marginBottom:"12px"}}>{
+                            <div className="row small" style={{justifyContent:"flex-end", gap:"12px", marginBottom:"12px"}}>
                               <label><input type="checkbox" checked={mapEnabled} onChange={e=>setMapEnabled(e.target.checked)} /> Map</label>
                               <label>Map Type:
-                                <select value={mapType} onChange={e=>setMapType(e.target.value)}>{
+                                <select value={mapType} onChange={e=>setMapType(e.target.value)}>
                                   <option value="street">Street</option>
                                   <option value="satellite">Satellite</option>
                                 </select>
-                              </label>
+                                </label>
                             </div>
-                            <div style={{border:"1px solid var(--line)", borderRadius:"12px", overflow:"hidden", minHeight:"260px", background:"#fff", marginBottom:"12px"}}>{
-                              mapEnabled && mapURL
-                                ? <iframe title="map" src={mapURL} style={{border:0,width:"100%",height:"100%",minHeight:"260px"}} loading="lazy" referrerPolicy="no-referrer-when-downgrade"></iframe>
-                                : <div className="muted" style={{padding:"24px",textAlign:"center"}}>Provide coordinates to view map.</div>
-                            }</div>
-                            <div style={{display:"grid", gap:"12px", gridTemplateColumns:"repeat(auto-fit, minmax(180px, 1fr))"}}>{
+                            <div style={{border:"1px solid var(--line)", borderRadius:"12px", overflow:"hidden", minHeight:"260px", background:"#fff", marginBottom:"12px"}}>
+                              {mapEnabled && mapURL ? (
+                                <iframe title="map" src={mapURL} style={{border:0,width:"100%",height:"100%",minHeight:"260px"}} loading="lazy" referrerPolicy="no-referrer-when-downgrade"></iframe>
+                              ) : (
+                                <div className="muted" style={{padding:"24px",textAlign:"center"}}>Provide coordinates to view map.</div>
+                              )}
+                            </div>
+                            <div style={{display:"grid", gap:"12px", gridTemplateColumns:"repeat(auto-fit, minmax(180px, 1fr))"}}>
                               <Info label="Owner" value={selectedLead?.["Owner Name"]} />
                               <Info label="County" value={selectedLead?.["County"]} />
                               <Info label="Address" value={selectedLead?.["Site Address"]} />
@@ -1308,7 +1294,7 @@
                               <Info label="Est. Value" value={selectedLead?.["Estimated Market Value"]} />
                               <Info label="Latitude" value={String(selectedLead?.["Latitude"] ?? "")} />
                               <Info label="Longitude" value={String(selectedLead?.["Longitude"] ?? "")} />
-                            }</div>
+                            </div>
                           </div>
                         </details>
 
@@ -1318,63 +1304,63 @@
                             {selectedLeadHasDNC ? (
                               <div className="muted" style={{color:"#b91c1c", fontWeight:600, marginBottom:"8px"}}>DNC flagged. Respect do-not-contact preferences.</div>
                             ) : null}
-                            <div style={{display:"grid", gap:"12px", gridTemplateColumns:"repeat(auto-fit, minmax(240px, 1fr))"}}>{
-                              <div>{
+                            <div style={{display:"grid", gap:"12px", gridTemplateColumns:"repeat(auto-fit, minmax(240px, 1fr))"}}>
+                              <div>
                                 <div className="muted" style={{fontSize:"11px", textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:"6px"}}>Phones</div>
                                 {selectedLeadPhones.length ? (
-                                  <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>{
+                                  <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>
                                     {selectedLeadPhones.map(phone=>(
-                                      <div key={`${phone.field}-${phone.href}`} className="contact-item">{
-                                        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>{
+                                      <div key={`${phone.field}-${phone.href}`} className="contact-item">
+                                        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
                                           <span style={{fontWeight:600}}>{phone.value}</span>
-                                          <div>{
+                                          <div>
                                             {phone.isPrimary && <span className="badge primary">Primary</span>}
                                             {phone.isDNC && <span className="badge danger">DNC</span>}
-                                          }</div>
-                                        }</div>
+                                          </div>
+                                        </div>
                                         <div className="muted" style={{fontSize:"11px", marginTop:"4px"}}>{phone.field}</div>
-                                        <div className="contact-actions">{
+                                        <div className="contact-actions">
                                           <a className="btn ghost" href={`tel:${phone.href}`}>Call</a>
                                           <a className="btn ghost" href={`sms:${phone.href}`}>Text</a>
                                           <button className="btn ghost" type="button" onClick={()=>copyToClipboard(phone.value)}>Copy</button>
-                                        }</div>
-                                      }</div>
+                                        </div>
+                                      </div>
                                     ))}
-                                  }</div>
+                                  </div>
                                 ) : (
                                   <div className="muted small">No phone numbers yet.</div>
                                 )}
-                              }</div>
-                              <div>{
+                              </div>
+                              <div>
                                 <div className="muted" style={{fontSize:"11px", textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:"6px"}}>Emails</div>
                                 {selectedLeadEmails.length ? (
-                                  <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>{
+                                  <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>
                                     {selectedLeadEmails.map(email=>(
-                                      <div key={`${email.field}-${email.value}`} className="contact-item">{
-                                        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>{
+                                      <div key={`${email.field}-${email.value}`} className="contact-item">
+                                        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
                                           <span style={{fontWeight:600}}>{email.value}</span>
                                           {email.isPrimary && <span className="badge primary">Primary</span>}
-                                        }</div>
+                                        </div>
                                         <div className="muted" style={{fontSize:"11px", marginTop:"4px"}}>{email.field}</div>
-                                        <div className="contact-actions">{
+                                        <div className="contact-actions">
                                           <a className="btn ghost" href={`mailto:${encodeURIComponent(email.value)}`}>Email</a>
                                           <button className="btn ghost" type="button" onClick={()=>copyToClipboard(email.value)}>Copy</button>
-                                        }</div>
-                                      }</div>
+                                        </div>
+                                      </div>
                                     ))}
-                                  }</div>
+                                  </div>
                                 ) : (
                                   <div className="muted small">No emails yet.</div>
                                 )}
-                              }</div>
-                            }</div>
+                              </div>
+                            </div>
                           </div>
                         </details>
 
                         <details className="panel">
                           <summary>✉️ Communication History</summary>
                           <div className="panel-body">
-                            <div className="row mb-8" style={{gap:"8px"}}>{
+                            <div className="row mb-8" style={{gap:"8px"}}>
                               {["New","Attempted","Contacted","Offer Sent","Under Contract","Dead"].map(s=>(
                                 <span key={s} className={"chip "+(selectedLead?.Status===s?"active":"")} onClick={()=>{
                                   if(!selectedLeadId) return;
@@ -1387,44 +1373,44 @@
                                   });
                                 }}>{s}</span>
                               ))}
-                            }</div>
-                            <div className="row mb-8">{
+                            </div>
+                            <div className="row mb-8">
                               <input className="input" placeholder="Next Action (e.g., Call Tue 10am)" value={selectedLead?.__nextAction||""}
                                 onChange={e=>{ if(!selectedLeadId) return; updateLeadById(selectedLeadId, current=>({...current,__nextAction:e.target.value})); }} />
                               <input type="date" value={selectedLead?.__lastContacted||""}
                                 onChange={e=>{ if(!selectedLeadId) return; updateLeadById(selectedLeadId, current=>({...current,__lastContacted:e.target.value})); }} />
-                            }</div>
+                            </div>
                             {selectedLead?.__notes ? (
-                              <div className="mb-8" style={{background:"#f1f5f9", borderRadius:"12px", padding:"12px"}}>{
+                              <div className="mb-8" style={{background:"#f1f5f9", borderRadius:"12px", padding:"12px"}}>
                                 <div className="muted" style={{fontSize:"11px", textTransform:"uppercase", letterSpacing:"0.05em"}}>Pinned Note</div>
                                 <div style={{whiteSpace:"pre-wrap", marginTop:"4px"}}>{selectedLead.__notes}</div>
-                              }</div>
+                              </div>
                             ) : null}
 
-                            <div className="row mt-16 mb-8" style={{alignItems:"center", justifyContent:"space-between"}}>{
+                            <div className="row mt-16 mb-8" style={{alignItems:"center", justifyContent:"space-between"}}>
                               <div style={{fontWeight:600}}>🤝 Assign to Buyer</div>
                               {assignedBuyer && <div className="muted" style={{fontSize:"12px"}}>Assigned to: {buyerLabel(assignedBuyer)}</div>}
-                            }</div>
-                            <div className="row mb-8" style={{alignItems:"center"}}>{
-                              <select value={selectedLead?.__assignedBuyerId||""} onChange={e=>handleAssignBuyer(selectedLead, e.target.value)} style={{minWidth:"200px"}}>{
+                            </div>
+                            <div className="row mb-8" style={{alignItems:"center"}}>
+                              <select value={selectedLead?.__assignedBuyerId||""} onChange={e=>handleAssignBuyer(selectedLead, e.target.value)} style={{minWidth:"200px"}}>
                                 <option value="">Unassigned</option>
                                 {buyers.map(b=>(<option key={b.__id} value={b.__id}>{buyerLabel(b)}</option>))}
                               </select>
-                            }</div>
+                            </div>
                             {matchingBuyers.length ? (
-                              <div className="mb-8">{
+                              <div className="mb-8">
                                 <div className="muted" style={{fontSize:"12px", marginBottom:"4px"}}>Suggested buyers (click to assign)</div>
-                                <div className="row" style={{gap:"8px"}}>{
+                                <div className="row" style={{gap:"8px"}}>
                                   {matchingBuyers.slice(0,6).map(b=>(
                                     <span key={b.__id} className={"chip "+(selectedLead?.__assignedBuyerId===b.__id?"active":"")} onClick={()=>handleAssignBuyer(selectedLead, b.__id)}>{buyerLabel(b)}</span>
                                   ))}
-                                }</div>
-                              }</div>
+                                </div>
+                              </div>
                             ) : null}
 
-                            <div className="row mt-16 mb-8" style={{justifyContent:"space-between", alignItems:"center"}}>{
+                            <div className="row mt-16 mb-8" style={{justifyContent:"space-between", alignItems:"center"}}>
                               <div style={{fontWeight:600}}>📝 History Log</div>
-                            }</div>
+                            </div>
                             <HistoryLog
                               entries={selectedLead?.__log || selectedLead?.__history || []}
                               type={leadLogType}
@@ -1444,23 +1430,25 @@
                         <details className="panel">
                           <summary>📌 Nearby Comps</summary>
                           <div className="panel-body">
-                            <div className="row small" style={{justifyContent:"flex-end", marginBottom:"12px"}}>{
+                            <div className="row small" style={{justifyContent:"flex-end", marginBottom:"12px"}}>
                               <span>Radius (miles)</span>
                               <input className="w-20" type="number" min="1" step="1" value={compRadius}
                                 onChange={e=>setCompRadius(Math.max(1, Number(e.target.value)||1))}/>
-                            }</div>
+                            </div>
                             {comps.length ? (
-                              <div className="table-lite">{
+                              <div className="table-lite">
                                 <table>
                                   <thead><tr><th>Dist (mi)</th><th>Owner</th><th>Address</th><th>County</th><th>Est. Value</th><th>Acreage</th></tr></thead>
-                                  <tbody>{
+                                  <tbody>
                                     {comps.map((c,i)=>(
                                       <tr key={i}><td>{c.distance.toFixed(2)}</td><td>{c.owner}</td><td>{c.address}</td><td>{c.county}</td><td>{c.value||"—"}</td><td>{c.acreage||"—"}</td></tr>
                                     ))}
-                                  }</tbody>
+                                  </tbody>
                                 </table>
-                              }</div>
-                            ) : <div className="muted">No comps found within {compRadius} miles.</div> }
+                              </div>
+                            ) : (
+                              <div className="muted">No comps found within {compRadius} miles.</div>
+                            )}
                           </div>
                         </details>
                       </>
@@ -1699,14 +1687,14 @@
         <div className="card mt-16" style={{padding:"16px"}}>
           <div style={{fontWeight:600}} className="mb-8">✅ Built-in Test Cases</div>
           <ul>
-            <li>Load Sample → click rows → map shows by default; toggle Street/Satellite.</li>
-            <li>Upload your PropStream contact export CSV → rows & contact details appear.</li>
+            <li>Load Sample → click rows → the map renders by default; toggle Street/Satellite.</li>
+            <li>Upload your PropStream contact export CSV → rows & multi-channel contact details appear.</li>
             <li>Switch Import mode between <i>Append</i> (de-dup APN+Address) and <i>Replace</i>.</li>
             <li>Use <b>Geocode Missing</b> to add coordinates for rows without lat/lon (progress updates, saved locally).</li>
-            <li>Use <b>Estimate Selected</b> / <b>Estimate All Missing</b> for auto-valuation from comps.</li>
-            <li>Adjust comps radius to see nearby properties from your dataset.</li>
-            <li>Buyers: upload CSV, filter by county, acres, and price; add single buyer and review details panel.</li>
-            <li>Use history logs to capture outreach on both leads and buyers; assign leads to buyers to build disposition pipeline.</li>
+            <li>Open the <b>Contact Details</b> panel to try Call/Text/Email/Copy actions and confirm DNC badges.</li>
+            <li>Capture outreach in the <b>Communication History</b> panel and History Log, including next action dates.</li>
+            <li>Buyers: upload CSV, filter by county, acres, and price; use <b>Match To Selected Lead</b> to surface matches.</li>
+            <li>Assign and unassign buyers from leads to verify status notes sync across both histories.</li>
             <li>Refresh the page — everything persists via LocalStorage.</li>
           </ul>
         </div>

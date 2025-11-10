@@ -11,7 +11,9 @@ All changes you make in the UI persist automatically in `localStorage`.
 ## Features
 
 * Lead management with history logging, buyer assignments, and bulk geocoding tools.
-* A dedicated **Buyers** tab with county, acreage, and price range filters plus buyer history tracking.
+* Collapsible lead detail panels covering the map, contact details, communication history, and nearby comps.
+* Multi-channel contact actions with click-to-call/text/email controls and DNC indicators pulled from your import fields.
+* A dedicated **Buyers** tab with county, acreage, and price range filters plus buyer history tracking and lead matching.
 * Automatic local persistence so uploaded leads, buyers, and notes survive page refreshes.
 
 ## Geocoding

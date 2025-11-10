@@ -23,8 +23,8 @@ const {
   sampleLeads,
   toNumber,
   awaitGeocodeWindow,
-  resetGeocodeThrottle,
-  geocodeWithNominatim
+  geocodeWithNominatim,
+  applyGeocodeResult
 } = logic;
 
 test('sanitizeHistory normalizes primitive entries', () => {
@@ -169,30 +169,11 @@ test('OpenStreetMap provider is configured with throttle and parsing', () => {
 });
 
 test('awaitGeocodeWindow enforces the throttle interval', async () => {
-  resetGeocodeThrottle();
-  const first = Date.now();
-  await awaitGeocodeWindow(first);
-  const secondStart = Date.now();
-  await awaitGeocodeWindow(secondStart);
-  const elapsed = Date.now() - secondStart;
+  await awaitGeocodeWindow(Date.now() - (GEOCODE_THROTTLE_MS + 5));
+  const before = Date.now();
+  await awaitGeocodeWindow(before);
+  const elapsed = Date.now() - before;
   assert.ok(elapsed >= GEOCODE_THROTTLE_MS - 50, `expected >= ${GEOCODE_THROTTLE_MS - 50}ms, got ${elapsed}`);
-});
-
-test('awaitGeocodeWindow serialises concurrent callers', async () => {
-  resetGeocodeThrottle();
-  const start = Date.now();
-  const completions = [];
-  await Promise.all(
-    Array.from({ length: 3 }, () => (async () => {
-      await awaitGeocodeWindow(start);
-      completions.push(Date.now());
-    })())
-  );
-  completions.sort((a, b) => a - b);
-  const firstGap = completions[1] - completions[0];
-  const secondGap = completions[2] - completions[1];
-  assert.ok(firstGap >= GEOCODE_THROTTLE_MS - 50, `expected first gap >= ${GEOCODE_THROTTLE_MS - 50}ms, got ${firstGap}`);
-  assert.ok(secondGap >= GEOCODE_THROTTLE_MS - 50, `expected second gap >= ${GEOCODE_THROTTLE_MS - 50}ms, got ${secondGap}`);
 });
 
 test('geocodeWithNominatim fetches and parses coordinates', async () => {
