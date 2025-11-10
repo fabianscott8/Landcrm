@@ -276,6 +276,22 @@
       "Cell","Cell 2","Landline","Landline 2","Phone 1","Phone 2",
       "Phone","Cell 3","Landline 3","Landline 4","Phone 3","Other Phone","Primary Phone","Secondary Phone"
     ];
+    const PHONE_FIELD_TO_DNC = new Map([
+      ["Cell","DNC"],
+      ["Cell 2","DNC 2"],
+      ["Cell 3","DNC 3"],
+      ["Landline","DNC"],
+      ["Landline 2","DNC 2"],
+      ["Landline 3","DNC 3"],
+      ["Landline 4","DNC 4"],
+      ["Phone","DNC"],
+      ["Phone 1","DNC"],
+      ["Phone 2","DNC 2"],
+      ["Phone 3","DNC 3"],
+      ["Other Phone","DNC 4"],
+      ["Primary Phone","DNC"],
+      ["Secondary Phone","DNC 2"]
+    ]);
     const DNC_FIELDS = ["DNC","DNC 2","DNC 3","DNC 4"];
     const EMAIL_FIELDS = ["Email","Email 1","Email 2","Email 3","Primary Email","Secondary Email"];
     const DNC_VALUES = new Set(["yes","y","true","1","dnc","do not call","do-not-call"]);
@@ -303,11 +319,12 @@
         const href = normalizePhoneHref(value);
         if(!href || seen.has(href)) return;
         seen.add(href);
+        const dncField = PHONE_FIELD_TO_DNC.get(field);
         entries.push({
           field,
           value,
           href,
-          isDNC: dncs.size > 0,
+          isDNC: dncField ? dncs.has(dncField) : false,
         });
       });
       return entries.map((entry, index)=>({
