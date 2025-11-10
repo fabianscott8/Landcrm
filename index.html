@@ -27,8 +27,8 @@
     thead th{background:#f3f4f6;color:#475569;font-size:12px;text-transform:uppercase}
     .grid{display:grid;gap:16px}
     @media(min-width:1024px){.grid-2{grid-template-columns:1fr 1fr}}
-    .hview{height:78vh;overflow:hidden}
-    .scroll{height:calc(78vh - 44px);overflow:auto}
+    .hview{height:78vh;display:flex;flex-direction:column;overflow:hidden}
+    .scroll{flex:1;overflow:auto;min-height:0}
     .muted{color:var(--muted);font-size:12px}
     .chip{border:1px solid #d1d5db;border-radius:6px;padding:4px 8px;font-size:12px;background:#fff;cursor:pointer}
     .chip.active{background:var(--brand);color:#fff;border-color:transparent}
@@ -42,6 +42,17 @@
     .center{display:flex;align-items:center;justify-content:center}
     .selected{background:#ecfdf5}
     .kbd{background:#eef2ff;border:1px solid #c7d2fe;border-radius:6px;padding:2px 6px;font-size:12px}
+    details.panel{border:1px solid var(--line);border-radius:12px;margin-bottom:12px;background:#fff;overflow:hidden}
+    details.panel summary{list-style:none;cursor:pointer;display:flex;align-items:center;justify-content:space-between;padding:12px 16px;font-weight:600}
+    details.panel summary::-webkit-details-marker{display:none}
+    details.panel[open] summary{border-bottom:1px solid var(--line)}
+    details.panel .panel-body{padding:12px 16px 16px}
+    .badge{display:inline-flex;align-items:center;font-size:11px;border-radius:999px;padding:2px 8px;background:#e2e8f0;color:#334155;margin-left:6px}
+    .badge.primary{background:#ddd6fe;color:#5b21b6}
+    .badge.danger{background:#fee2e2;color:#b91c1c}
+    .contact-item{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#fff}
+    .contact-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+    .contact-actions a,.contact-actions button{font-size:12px;padding:6px 10px}
   </style>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -50,47 +61,515 @@
 <body>
   <div class="container"><div id="root"></div></div>
 
+  <script src="crm-logic.js"></script>
   <script type="text/babel">
-    const {useEffect, useMemo, useState} = React;
+    const {useEffect, useMemo, useRef, useState} = React;
+
+    const CRM = window.CRM_LOGIC || {};
+    const DEFAULT_HISTORY_TYPES = ["Note","Call","Offer","Follow-up","Task","Status","Assignment","Lead Assignment"];
+    const fallbackAsNumber = (v)=>{
+      if(v === null || v === undefined) return undefined;
+      const s = String(v).trim();
+      if(!s || s === "—" || s === "-") return undefined;
+      const lower = s.toLowerCase();
+      if(lower === "na" || lower === "null") return undefined;
+      const n = Number(s);
+      if(Number.isFinite(n)) return n;
+      const fallback = Number(s.replace(/[^0-9.\-]/g, ""));
+      return Number.isFinite(fallback) ? fallback : undefined;
+    };
+    const asNumber = typeof CRM.asNumber === "function" ? CRM.asNumber : fallbackAsNumber;
+    const stripPlaceholderText = (value)=>{
+      if(value === null || value === undefined) return "";
+      const s = String(value).trim();
+      if(!s || s === "—" || s === "-") return "";
+      return s;
+    };
+    const rawCoordinateToNumber = typeof CRM.normalizeCoordinate === "function"
+      ? CRM.normalizeCoordinate
+      : ((value)=>{
+          const numeric = asNumber(value);
+          if(!Number.isFinite(numeric)) return undefined;
+          return numeric;
+        });
+    const normalizeLatitude = typeof CRM.normalizeLatitude === "function"
+      ? CRM.normalizeLatitude
+      : ((value)=>{
+          const numeric = asNumber(value);
+          if(!Number.isFinite(numeric)) return undefined;
+          if(numeric < -90 || numeric > 90) return undefined;
+          return numeric;
+        });
+    const normalizeLongitude = typeof CRM.normalizeLongitude === "function"
+      ? CRM.normalizeLongitude
+      : ((value)=>{
+          const numeric = asNumber(value);
+          if(!Number.isFinite(numeric)) return undefined;
+          if(numeric < -180 || numeric > 180) return undefined;
+          return numeric;
+        });
+    const coordinatesLookValid = (lat, lon)=>{
+      if(!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+      if(Math.abs(lat) <= 1e-9 && Math.abs(lon) <= 1e-9) return false;
+      return true;
+    };
+    const normalizeCoordinate = rawCoordinateToNumber;
+    const hasCoords = typeof CRM.hasCoords === "function"
+      ? CRM.hasCoords
+      : ((obj)=>{
+          if(!obj || typeof obj !== "object") return false;
+          const lat = normalizeLatitude(obj.Latitude ?? obj.lat ?? obj.latitude);
+          const lon = normalizeLongitude(obj.Longitude ?? obj.lon ?? obj.longitude);
+          return coordinatesLookValid(lat, lon);
+        });
+    const needsCoords = typeof CRM.needsCoords === "function" ? CRM.needsCoords : (obj=>!hasCoords(obj));
+    const computeGeocodeTargets = typeof CRM.computeGeocodeTargets === "function"
+      ? CRM.computeGeocodeTargets
+      : ((leads, selected)=>{
+          const list = Array.isArray(leads) ? leads : [];
+          const selectedSet = selected instanceof Set ? selected : (selected ? new Set(selected) : null);
+          const base = (selectedSet && selectedSet.size) ? list.filter(l=>selectedSet.has(l.__id)) : list;
+          return base.map((l, idx)=>({l, idx})).filter(({l})=>needsCoords(l));
+        });
+    const DEFAULT_GEOCODE_PROVIDERS = [
+      {
+        name: "OpenStreetMap",
+        throttleMs: 1200,
+        buildUrl: (query)=>`https://nominatim.openstreetmap.org/search?format=json&limit=1&addressdetails=0&email=landcrm-demo@example.com&q=${encodeURIComponent(query)}`,
+        parse: (payload)=>{
+          if(Array.isArray(payload) && payload[0]){
+            const lat = normalizeLatitude(payload[0].lat ?? payload[0].latitude);
+            const lon = normalizeLongitude(payload[0].lon ?? payload[0].lng ?? payload[0].longitude);
+            if(coordinatesLookValid(lat, lon)) return {lat, lon};
+          }
+          return null;
+        }
+      }
+    ];
+    const HISTORY_TYPES = Array.isArray(CRM.HISTORY_TYPES) && CRM.HISTORY_TYPES.length ? CRM.HISTORY_TYPES : DEFAULT_HISTORY_TYPES;
+    const fallbackFormatDateTime = (iso)=>{
+      if(!iso) return "";
+      try{ return new Date(iso).toLocaleString(); }
+      catch{ return iso || ""; }
+    };
+    const formatDateTime = typeof CRM.formatDateTime === "function" ? CRM.formatDateTime : fallbackFormatDateTime;
+    const makeId = typeof CRM.makeId === "function" ? CRM.makeId : (()=>`id_${Math.random().toString(36).slice(2)}_${Date.now().toString(36)}`);
+    const makeHistoryEntry = typeof CRM.makeHistoryEntry === "function"
+      ? CRM.makeHistoryEntry
+      : ((type, note, extras)=>({
+          id: makeId(),
+          type: type || "Note",
+          note: note ?? "",
+          timestamp: new Date().toISOString(),
+          ...(extras && typeof extras === "object" ? extras : null)
+        }));
+    const {DEFAULT_SAMPLE_LEADS, DEFAULT_SAMPLE_BUYERS} = (()=>{
+      const now = Date.now();
+      const isoDaysAgo = (days)=> new Date(now - days*86400000).toISOString();
+      const entry = (days, type, note)=> ({...makeHistoryEntry(type, note), timestamp: isoDaysAgo(days)});
+      return {
+        DEFAULT_SAMPLE_LEADS: [
+          {
+            "Owner Name": "John & Jane Sample",
+            County: "Citrus",
+            City: "Citrus Springs",
+            State: "FL",
+            Zip: "34433",
+            "Site Address": "1234 W Elm Dr, Citrus Springs, FL 34433",
+            "Estimated Market Value": "$12,500",
+            Latitude: 28.9723,
+            Longitude: -82.4891,
+            APN: "18E17S100010 01230 0120",
+            Acreage: "0.24",
+            Cell: "(352) 555-0199",
+            "Email 1": "john.sample@citrusland.com",
+            Status: "Contacted",
+            __notes: "Seller is open to a clean cash offer with a quick close.",
+            __nextAction: "Send purchase agreement draft",
+            __lastContacted: isoDaysAgo(2).slice(0,10),
+            __assignedBuyerId: null,
+            __log: [
+              entry(6, "Call", "Spoke with John – property is vacant and taxes are current."),
+              entry(4, "Note", "Mailed follow-up packet with offer range."),
+              entry(1, "Offer", "Working on written offer around $9,500.")
+            ]
+          },
+          {
+            "Owner Name": "Acme Holdings LLC",
+            County: "Citrus",
+            City: "Citrus Springs",
+            State: "FL",
+            Zip: "34433",
+            "Site Address": "9876 N Maple Way, Citrus Springs, FL 34433",
+            "Estimated Market Value": "$14,900",
+            Latitude: 28.9677,
+            Longitude: -82.4612,
+            APN: "18E17S100020 04560 0070",
+            Acreage: "0.25",
+            "Phone 1": "(352) 555-0142",
+            "Email 1": "offers@acmeholdings.example",
+            Status: "New",
+            __notes: "Cold mailer response asking for quick valuation.",
+            __nextAction: "Research comps and call back",
+            __lastContacted: isoDaysAgo(5).slice(0,10),
+            __assignedBuyerId: null,
+            __log: [
+              entry(10, "Note", "Lead imported from PropStream CSV."),
+              entry(3, "Task", "Pull three nearby sold comps.")
+            ]
+          }
+        ],
+        DEFAULT_SAMPLE_BUYERS: [
+          {
+            "Buyer Name / Company":"LandPath Ventures",
+            "Buy Box - Counties":"Citrus; Marion",
+            "Buy Box - States":"FL",
+            "Min Acres":"0.2",
+            "Max Acres":"10",
+            "Min Price":"$5,000",
+            "Max Price":"$80,000",
+            "Funding Type (Cash/Hard Money)":"Cash",
+            "Phone":"(352) 555-0118",
+            "Email":"offers@landpath.com",
+            __notes: "Prefers infill lots close to paved roads.",
+            __log: [
+              entry(25, "Assignment", "Closed Inverness lot assignment in May."),
+              entry(7, "Call", "Interested in 0.25-0.5 acre inventory in Citrus.")
+            ]
+          },
+          {
+            "Buyer Name / Company":"Sunstate Holdings",
+            "Buy Box - Counties":"Hernando; Citrus",
+            "Buy Box - States":"FL",
+            "Min Acres":"0.18",
+            "Max Acres":"5",
+            "Min Price":"$3,000",
+            "Max Price":"$65,000",
+            "Funding Type (Cash/Hard Money)":"Cash",
+            "Phone":"(813) 555-0194",
+            "Email":"acq@sunstate.com",
+            __notes: "Will take down multiple lots at once.",
+            __log: [
+              entry(14, "Note", "Met at Tampa meetup – send over Citrus list weekly.")
+            ]
+          },
+          {
+            "Buyer Name / Company":"Trailblazer Capital",
+            "Buy Box - Counties":"Polk; Lake",
+            "Buy Box - States":"FL",
+            "Min Acres":"0.25",
+            "Max Acres":"12",
+            "Min Price":"$8,000",
+            "Max Price":"$120,000",
+            "Funding Type (Cash/Hard Money)":"Hard Money",
+            "Phone":"(407) 555-0137",
+            "Email":"closings@trailblazer.cap",
+            __notes: "Has rehab crew for light clearing; needs 30-day close.",
+            __log: [
+              entry(5, "Call", "Checking on Polk pipeline; asked for 3 new deals.")
+            ]
+          }
+        ]
+      };
+    })();
+    const PHONE_FIELDS = [
+      "Cell","Cell 2","Landline","Landline 2","Phone 1","Phone 2",
+      "Phone","Cell 3","Landline 3","Landline 4","Phone 3","Other Phone","Primary Phone","Secondary Phone"
+    ];
+    const DNC_FIELDS = ["DNC","DNC 2","DNC 3","DNC 4"];
+    const EMAIL_FIELDS = ["Email","Email 1","Email 2","Email 3","Primary Email","Secondary Email"];
+    const DNC_VALUES = new Set(["yes","y","true","1","dnc","do not call","do-not-call"]);
+    const leadHasCoordinates = typeof CRM.leadHasCoordinates === "function" ? CRM.leadHasCoordinates : hasCoords;
+    const normalizePhoneHref = (value)=>{
+      const digits = String(value ?? "").replace(/[^0-9+]/g,"");
+      if(!digits) return "";
+      if(digits.startsWith("+")) return digits;
+      if(digits.length===11 && digits.startsWith("1")) return `+${digits}`;
+      if(digits.length===10) return `+1${digits}`;
+      return digits;
+    };
+    const extractPhones = (lead)=>{
+      if(!lead) return [];
+      const dncs = new Set(DNC_FIELDS.filter(field=>{
+        const value = String(lead[field] ?? "").trim().toLowerCase();
+        return value && DNC_VALUES.has(value);
+      }));
+      const seen = new Set();
+      const entries = [];
+      PHONE_FIELDS.forEach((field)=>{
+        const raw = lead[field];
+        const value = typeof raw === "number" ? String(raw) : String(raw ?? "").trim();
+        if(!value || value === "—") return;
+        const href = normalizePhoneHref(value);
+        if(!href || seen.has(href)) return;
+        seen.add(href);
+        entries.push({
+          field,
+          value,
+          href,
+          isDNC: dncs.size > 0,
+        });
+      });
+      return entries.map((entry, index)=>({
+        ...entry,
+        isPrimary: index === 0
+      }));
+    };
+    const extractEmails = (lead)=>{
+      if(!lead) return [];
+      const seen = new Set();
+      const entries = [];
+      EMAIL_FIELDS.forEach((field)=>{
+        const raw = lead[field];
+        const value = typeof raw === "number" ? String(raw) : String(raw ?? "").trim();
+        if(!value || value === "—") return;
+        const key = value.toLowerCase();
+        if(seen.has(key)) return;
+        seen.add(key);
+        entries.push({
+          field,
+          value,
+          isPrimary: entries.length === 0
+        });
+      });
+      return entries;
+    };
+    const copyToClipboard = async (value)=>{
+      if(!value) return;
+      try{
+        if(navigator.clipboard && typeof navigator.clipboard.writeText === "function"){
+          await navigator.clipboard.writeText(value);
+          return;
+        }
+      }catch(err){
+        console.warn("Clipboard API failed", err);
+      }
+      const textarea = document.createElement("textarea");
+      textarea.value = value;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "absolute";
+      textarea.style.left = "-9999px";
+      document.body.appendChild(textarea);
+      textarea.select();
+      try{
+        document.execCommand("copy");
+      }catch(err){
+        console.warn("Fallback copy failed", err);
+      }
+      document.body.removeChild(textarea);
+    };
+    const sanitizeHistory = typeof CRM.sanitizeHistory === "function" ? CRM.sanitizeHistory : ((list)=>{
+      if(!Array.isArray(list)) return [];
+      return list.map(entry=>{
+        if(entry && typeof entry === "object"){
+          return {
+            id: entry.id || makeId(),
+            type: entry.type || entry.kind || "Note",
+            note: entry.note ?? entry.text ?? "",
+            timestamp: entry.timestamp || entry.date || new Date().toISOString()
+          };
+        }
+        const value = String(entry ?? "");
+        return {id:makeId(), type:"Note", note:value, timestamp:new Date().toISOString()};
+      });
+    });
+    const sleep = typeof CRM.sleep === "function" ? CRM.sleep : ((ms)=> new Promise(resolve=>setTimeout(resolve, ms)));
+    const toNumber = typeof CRM.toNumber === "function" ? CRM.toNumber : ((x)=>{
+      const raw = String(x ?? "").replace(/[$,\s]/g,"");
+      if(!raw) return undefined;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : undefined;
+    });
+    const cleanLeadRecord = typeof CRM.cleanLeadRecord === "function" ? CRM.cleanLeadRecord : ((o={})=>{
+      const history = sanitizeHistory(o.__log || o.__history);
+      return {
+        ...o,
+        "Owner Name": stripPlaceholderText(o["Owner Name"]||o.owner||""),
+        County: stripPlaceholderText(o["County"]||""),
+        "Site Address": stripPlaceholderText(o["Site Address"]||""),
+        "Estimated Market Value": stripPlaceholderText(o["Estimated Market Value"]||""),
+        APN: stripPlaceholderText(o["APN"]||""),
+        Latitude: normalizeLatitude(asNumber(o["Latitude"] ?? o.lat ?? o.latitude)),
+        Longitude: normalizeLongitude(asNumber(o["Longitude"] ?? o.lon ?? o.longitude)),
+        __history: history,
+        __log: history,
+        __id: o.__id || makeId()
+      };
+    });
+    const cleanBuyerRecord = typeof CRM.cleanBuyerRecord === "function" ? CRM.cleanBuyerRecord : ((o={})=>{
+      const history = sanitizeHistory(o.__log || o.__history);
+      return {
+        ...o,
+        __history: history,
+        __log: history,
+        __id: o.__id || makeId()
+      };
+    });
+    const applyGeocodeResult = typeof CRM.applyGeocodeResult === "function"
+      ? CRM.applyGeocodeResult
+      : ((lead, coords={})=>{
+          if(!lead || typeof lead !== "object") return lead;
+          const lat = normalizeLatitude(coords.lat ?? coords.Latitude ?? coords.latitude);
+          const lon = normalizeLongitude(coords.lon ?? coords.lng ?? coords.Longitude ?? coords.longitude);
+          if(!coordinatesLookValid(lat, lon)) return lead;
+          const existingLat = normalizeLatitude(lead.Latitude);
+          const existingLon = normalizeLongitude(lead.Longitude);
+          const provider = coords.provider || coords.source || null;
+          const next = {...lead};
+          let changed = false;
+          if(existingLat !== lat || typeof next.Latitude !== "number"){
+            next.Latitude = lat;
+            changed = true;
+          }
+          if(existingLon !== lon || typeof next.Longitude !== "number"){
+            next.Longitude = lon;
+            changed = true;
+          }
+          if(provider){
+            const note = `Coordinates verified via ${provider}`;
+            const historyBase = Array.isArray(lead.__log) ? lead.__log : (Array.isArray(lead.__history) ? lead.__history : []);
+            const historyClone = historyBase.slice();
+            const alreadyLogged = historyClone.length && historyClone[0] && historyClone[0].type === "Status" && historyClone[0].note === note;
+            if(!alreadyLogged){
+              historyClone.unshift(makeHistoryEntry("Status", note));
+              next.__history = historyClone;
+              next.__log = historyClone;
+              changed = true;
+            }
+          }
+          return changed ? next : lead;
+        });
+    const GEOCODE_PROVIDERS = Array.isArray(CRM.GEOCODE_PROVIDERS) && CRM.GEOCODE_PROVIDERS.length ? CRM.GEOCODE_PROVIDERS : DEFAULT_GEOCODE_PROVIDERS;
+    const GEOCODE_THROTTLE_MS = typeof CRM.GEOCODE_THROTTLE_MS === "number" && CRM.GEOCODE_THROTTLE_MS>0 ? CRM.GEOCODE_THROTTLE_MS : (GEOCODE_PROVIDERS[0]?.throttleMs || 1200);
+    const sampleLeads = Array.isArray(CRM.sampleLeads) && CRM.sampleLeads.length ? CRM.sampleLeads : DEFAULT_SAMPLE_LEADS;
+    const sampleBuyers = Array.isArray(CRM.sampleBuyers) && CRM.sampleBuyers.length ? CRM.sampleBuyers : DEFAULT_SAMPLE_BUYERS;
+    const STORAGE_KEYS = {leads:"land_crm_leads", buyers:"land_crm_buyers"};
+    const readSavedRecords = (key)=>{
+      try{
+        if(typeof localStorage === "undefined") return null;
+        const raw = localStorage.getItem(key);
+        if(!raw) return null;
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : null;
+      }catch(err){
+        console.warn(`Failed to parse saved data for ${key}`, err);
+        return null;
+      }
+    };
 
     function App(){
       const [tab, setTab] = useState("leads");
 
       // Leads
-      const [leads, setLeads] = useState([]);
+      const [leads, setLeads] = useState(()=>{
+        const saved = readSavedRecords(STORAGE_KEYS.leads);
+        const base = saved && saved.length ? saved : sampleLeads;
+        return base.map(cleanLeadRecord);
+      });
       const [search, setSearch] = useState("");
       const [countyFilter, setCountyFilter] = useState("");
       const [selectedIndex, setSelectedIndex] = useState(0);
+      const [leadLogType, setLeadLogType] = useState("Note");
+      const [leadLogText, setLeadLogText] = useState("");
+      const [leadLogDate, setLeadLogDate] = useState("");
       const [importMode, setImportMode] = useState("append");
       const [mapEnabled, setMapEnabled] = useState(true);
       const [mapType, setMapType] = useState("street");
       const [compRadius, setCompRadius] = useState(5);
       const [geocodeBusy, setGeocodeBusy] = useState(false);
       const [geocodeProgress, setGeocodeProgress] = useState({done:0,total:0});
+      const [geocodeStatus, setGeocodeStatus] = useState("");
+      const [bulkSelection, setBulkSelection] = useState(()=>[]);
+      const geocodeCacheRef = useRef(new Map());
+      const geocodeThrottleRef = useRef({last:0});
+      const selectAllRef = useRef(null);
 
       // Buyers
-      const [buyers, setBuyers] = useState([]);
+      const [buyers, setBuyers] = useState(()=>{
+        const saved = readSavedRecords(STORAGE_KEYS.buyers);
+        const base = saved && saved.length ? saved : sampleBuyers;
+        return base.map(cleanBuyerRecord);
+      });
+      const [selectedBuyerId, setSelectedBuyerId] = useState(null);
       const [buyerCounty, setBuyerCounty] = useState("");
       const [minAcres, setMinAcres] = useState("");
       const [maxAcres, setMaxAcres] = useState("");
       const [minPrice, setMinPrice] = useState("");
       const [maxPrice, setMaxPrice] = useState("");
       const [buyersImportMode, setBuyersImportMode] = useState("append");
+      const [buyerLogType, setBuyerLogType] = useState("Note");
+      const [buyerLogText, setBuyerLogText] = useState("");
+      const [buyerLogDate, setBuyerLogDate] = useState("");
+      const [buyerMatchLeadId, setBuyerMatchLeadId] = useState(null);
+      const [buyerStatus, setBuyerStatus] = useState("");
 
-      // Load / save
+      const leadLabel = (lead)=>{
+        if(!lead) return "Lead";
+        const owner=lead["Owner Name"]||"";
+        const address=lead["Site Address"]||"";
+        if(owner && address) return `${owner} – ${address}`;
+        return owner || address || lead.APN || "Lead";
+      };
+      const buyerLabel = (buyer)=> buyer?.["Buyer Name / Company"] || buyer?.Company || buyer?.Name || "Buyer";
+      const updateLeadById = (id, updater)=>{
+        if(!id) return;
+        setLeads(prev=>{
+          const idx = prev.findIndex(l=>l.__id===id);
+          if(idx===-1) return prev;
+          const clone=prev.slice();
+          const current=prev[idx];
+          const updated=updater(current)||current;
+          clone[idx]=updated;
+          return clone;
+        });
+      };
+      const updateBuyerById = (id, updater)=>{
+        if(!id) return;
+        setBuyers(prev=>{
+          const idx=prev.findIndex(b=>b.__id===id);
+          if(idx===-1) return prev;
+          const clone=prev.slice();
+          const current=prev[idx];
+          const updated=updater(current)||current;
+          clone[idx]=updated;
+          return clone;
+        });
+      };
+
+      // Save updates locally
       useEffect(()=>{
         try{
-          const s = localStorage.getItem("land_crm_leads");
-          setLeads(s ? JSON.parse(s) : sampleLeads);
-          setSelectedIndex(0);
-        }catch{ setLeads(sampleLeads); setSelectedIndex(0); }
+          if(typeof localStorage !== "undefined"){
+            localStorage.setItem(STORAGE_KEYS.leads, JSON.stringify(leads));
+          }
+        }catch(err){
+          console.warn("Failed to persist leads", err);
+        }
+      },[leads]);
+      useEffect(()=>{
         try{
-          const b = localStorage.getItem("land_crm_buyers");
-          if (b) setBuyers(JSON.parse(b));
-        }catch{}
-      },[]);
-      useEffect(()=>{ try{localStorage.setItem("land_crm_leads", JSON.stringify(leads));}catch{} },[leads]);
-      useEffect(()=>{ try{localStorage.setItem("land_crm_buyers", JSON.stringify(buyers));}catch{} },[buyers]);
+          if(typeof localStorage !== "undefined"){
+            localStorage.setItem(STORAGE_KEYS.buyers, JSON.stringify(buyers));
+          }
+        }catch(err){
+          console.warn("Failed to persist buyers", err);
+        }
+      },[buyers]);
+      useEffect(()=>{
+        setBulkSelection(prev=>{
+          const allowed = new Set(leads.map(l=>l.__id));
+          const next=[];
+          let changed=false;
+          for(const id of prev){
+            if(allowed.has(id)){
+              next.push(id);
+            }else{
+              changed=true;
+            }
+          }
+          return changed ? next : prev;
+        });
+      },[leads]);
 
       // CSV
       function parseCSV(text){
@@ -159,20 +638,6 @@
         }
         return out;
       }
-      const toNumber = (x)=>{ const n=Number(String(x??"").replace(/[$,\s]/g,"")); return Number.isFinite(n)?n:undefined; };
-      const cleanLeadRecord = (o)=>({
-        ...o,
-        "Owner Name":o["Owner Name"]||"", County:o["County"]||"", "Site Address":o["Site Address"]||"",
-        "Estimated Market Value":o["Estimated Market Value"]||"", APN:o["APN"]||"",
-        Latitude: toNumber(o["Latitude"]), Longitude: toNumber(o["Longitude"]),
-        Acreage: o["Acreage"] || o["Lot Acres"] || o["Lot Size (acres)"] || "",
-        "First Name": o["First Name"]||o["First Name (0)"]||"", "Last Name": o["Last Name"]||o["Last Name (0)"]||"",
-        "Company Name": o["Company Name"]||"", "Street Address": o["Street Address"]||"", City:o["City"]||"", State:o["State"]||"", Zip:o["Zip"]||"",
-        Cell:o["Cell"]||"", "Cell 2":o["Cell 2"]||"", "Cell 3":o["Cell 3"]||"", Landline:o["Landline"]||"", "Landline 2":o["Landline 2"]||"", "Landline 3":o["Landline 3"]||"", "Landline 4":o["Landline 4"]||"",
-        "Email 1":o["Email 1"]||o["Email"]||"", "Email 2":o["Email 2"]||"", "Email 3":o["Email 3"]||"",
-        Status: o["Status"]||"New", Type: o["Type"]||"Seller Lead",
-        __notes:o.__notes||"", __lastContacted:o.__lastContacted||"", __nextAction:o.__nextAction||"", __tags:Array.isArray(o.__tags)?o.__tags:[]
-      });
       const leadKey = (o)=>`${(o["APN"]||"").toLowerCase()}|${(o["Site Address"]||"").toLowerCase()}`;
       const dedupeAppend = (existing, incoming)=>{
         const seen = new Set(existing.map(leadKey)); const merged=existing.slice();
@@ -188,6 +653,7 @@
             const objs=rowsToObjects(rows).map(cleanLeadRecord);
             setLeads(prev=> importMode==="replace" ? objs : dedupeAppend(prev, objs));
             setSelectedIndex(0);
+            setBulkSelection([]);
           }catch(err){ alert("Unable to parse leads CSV: "+err); }
         };
         reader.readAsText(file);
@@ -198,7 +664,7 @@
         reader.onload=(evt)=>{
           try{
             const rows=parseCSV(String(evt.target.result||""));
-            const objs=rowsToObjects(rows);
+            const objs=rowsToObjects(rows).map(cleanBuyerRecord);
             setBuyers(prev=> buyersImportMode==="replace" ? objs : prev.concat(objs));
           }catch(err){ alert("Unable to parse buyers CSV: "+err); }
         };
@@ -217,7 +683,49 @@
         const set=new Set(); for(const l of leads) if(l["County"]) set.add(String(l["County"]).trim());
         return Array.from(set).sort((a,b)=>a.localeCompare(b));
       },[leads]);
-      const selectedLead = filteredLeads[selectedIndex] || filteredLeads[0];
+      const selectedIndexSafe = useMemo(()=>{
+        if(!filteredLeads.length) return -1;
+        return Math.min(Math.max(selectedIndex, 0), filteredLeads.length-1);
+      },[filteredLeads, selectedIndex]);
+      useEffect(()=>{
+        if(selectedIndexSafe===-1 && filteredLeads.length){
+          setSelectedIndex(0);
+        }
+      },[filteredLeads.length, selectedIndexSafe]);
+      const selectedLead = selectedIndexSafe>=0 ? filteredLeads[selectedIndexSafe] : null;
+      const selectedLeadId = selectedLead?.__id;
+      useEffect(()=>{ setLeadLogText(""); setLeadLogType("Note"); setLeadLogDate(""); },[selectedLeadId]);
+
+      const assignedBuyer = useMemo(()=> selectedLead ? buyers.find(b=>b.__id===selectedLead.__assignedBuyerId) || null : null, [buyers, selectedLead]);
+      const matchingBuyers = useMemo(()=>{
+        if(!selectedLead) return [];
+        const county=(selectedLead["County"]||"").toLowerCase();
+        const acres=toNumber(selectedLead["Acreage"]);
+        const value=toNumber(selectedLead["Estimated Market Value"]);
+        return buyers.filter(b=>{
+          const counties=(b["Buy Box - Counties"]||"").toLowerCase();
+          const countyOK=!county || counties.includes(county);
+          const minA=toNumber(b["Min Acres"]); const maxA=toNumber(b["Max Acres"]);
+          const minP=toNumber(b["Min Price"]); const maxP=toNumber(b["Max Price"]);
+          const acresOK = !Number.isFinite(acres) || ((minA??-Infinity) <= acres && (maxA??Infinity) >= acres);
+          const priceOK = !Number.isFinite(value) || ((minP??-Infinity) <= value && (maxP??Infinity) >= value);
+          return countyOK && acresOK && priceOK;
+        });
+      },[buyers, selectedLead]);
+      const matchLead = useMemo(()=> buyerMatchLeadId ? (leads.find(l=>l.__id===buyerMatchLeadId) || null) : null, [buyerMatchLeadId, leads]);
+      useEffect(()=>{
+        if(buyerMatchLeadId && !matchLead){
+          setBuyerMatchLeadId(null);
+          setBuyerStatus("Lead match cleared – lead no longer available.");
+        }else if(buyerMatchLeadId && matchLead){
+          setBuyerStatus(`Matching buyers for ${leadLabel(matchLead)}`);
+        }else if(!buyerMatchLeadId){
+          setBuyerStatus(prev=> prev.startsWith("Matching buyers") ? "" : prev);
+        }
+      },[buyerMatchLeadId, matchLead]);
+      const selectedLeadPhones = useMemo(()=> extractPhones(selectedLead), [selectedLead]);
+      const selectedLeadHasDNC = useMemo(()=> selectedLeadPhones.some(item=>item.isDNC), [selectedLeadPhones]);
+      const selectedLeadEmails = useMemo(()=> extractEmails(selectedLead), [selectedLead]);
 
       // Map URL
       const mapURL = React.useMemo(()=>{
@@ -237,13 +745,127 @@
         const n=(x)=>{ const v=Number(String(x??"").replace(/[$,\s]/g,"")); return Number.isFinite(v)?v:undefined; };
         const minA=n(minAcres)??-Infinity, maxA=n(maxAcres)??Infinity;
         const minP=n(minPrice)??-Infinity, maxP=n(maxPrice)??Infinity;
+        const countyTarget = matchLead ? (matchLead["County"]||"").toLowerCase() : "";
+        const acresTarget = matchLead ? toNumber(matchLead["Acreage"]) : undefined;
         return buyers.filter(b=>{
           const acresOK = (()=>{ const lo=n(b["Min Acres"])??-Infinity, hi=n(b["Max Acres"])??Infinity; return lo<=maxA && hi>=minA; })();
           const priceOK = (()=>{ const lo=n(b["Min Price"])??-Infinity, hi=n(b["Max Price"])??Infinity; return lo<=maxP && hi>=minP; })();
-          const countyOK = !buyerCounty || (b["Buy Box - Counties"]||"").toLowerCase().includes(buyerCounty.toLowerCase());
-          return acresOK && priceOK && countyOK;
+          const buyerCounties = (b["Buy Box - Counties"]||"").toLowerCase();
+          const countyFilterMatch = !buyerCounty || buyerCounties.includes(buyerCounty.toLowerCase());
+          const matchCountyOK = !countyTarget || buyerCounties.includes(countyTarget);
+          const matchAcresOK = !Number.isFinite(acresTarget)
+            || ((n(b["Min Acres"])??-Infinity) <= acresTarget && (n(b["Max Acres"])??Infinity) >= acresTarget);
+          return acresOK && priceOK && countyFilterMatch && (!matchLead || (matchCountyOK && matchAcresOK));
         });
-      },[buyers,minAcres,maxAcres,minPrice,maxPrice,buyerCounty]);
+      },[buyers,minAcres,maxAcres,minPrice,maxPrice,buyerCounty, matchLead]);
+      useEffect(()=>{
+        if(filteredBuyers.length){
+          if(!selectedBuyerId || !filteredBuyers.some(b=>b.__id===selectedBuyerId)){
+            setSelectedBuyerId(filteredBuyers[0].__id);
+          }
+        }else if(selectedBuyerId){
+          setSelectedBuyerId(null);
+        }
+      },[filteredBuyers, selectedBuyerId]);
+      const selectedBuyer = useMemo(()=>{
+        if(!filteredBuyers.length) return null;
+        return filteredBuyers.find(b=>b.__id===selectedBuyerId) || filteredBuyers[0];
+      },[filteredBuyers, selectedBuyerId]);
+      const selectedBuyerSafeId = selectedBuyer?.__id || null;
+      useEffect(()=>{ setBuyerLogText(""); setBuyerLogType("Note"); setBuyerLogDate(""); },[selectedBuyerSafeId]);
+      const assignedLeadsForBuyer = useMemo(()=>{
+        if(!selectedBuyer) return [];
+        return leads.filter(l=>l.__assignedBuyerId===selectedBuyer.__id);
+      },[leads, selectedBuyer]);
+
+      function handleAddLeadHistory(){
+        if(!selectedLeadId || !leadLogText.trim()) return;
+        const extras = leadLogDate ? {nextActionDate: leadLogDate} : undefined;
+        const entry = makeHistoryEntry(leadLogType, leadLogText.trim(), extras);
+        updateLeadById(selectedLeadId, current=>{
+          const base = Array.isArray(current.__log) ? current.__log.slice() : Array.isArray(current.__history) ? current.__history.slice() : [];
+          base.unshift(entry);
+          return {...current, __history:base, __log:base};
+        });
+        setLeadLogText("");
+        setLeadLogDate("");
+      }
+      function handleDeleteLeadHistory(id){
+        if(!selectedLeadId) return;
+        updateLeadById(selectedLeadId, current=>{
+          const filtered = (Array.isArray(current.__log) ? current.__log : Array.isArray(current.__history) ? current.__history : []).filter(entry=>entry.id!==id);
+          return {...current, __history:filtered, __log:filtered};
+        });
+      }
+      function handleAddBuyerHistory(){
+        if(!selectedBuyerSafeId || !buyerLogText.trim()) return;
+        const extras = buyerLogDate ? {nextActionDate: buyerLogDate} : undefined;
+        const entry=makeHistoryEntry(buyerLogType, buyerLogText.trim(), extras);
+        updateBuyerById(selectedBuyerSafeId, current=>{
+          const base = Array.isArray(current.__log) ? current.__log.slice() : Array.isArray(current.__history) ? current.__history.slice() : [];
+          base.unshift(entry);
+          return {...current, __history:base, __log:base};
+        });
+        setBuyerLogText("");
+        setBuyerLogDate("");
+      }
+      function handleDeleteBuyerHistory(id){
+        if(!selectedBuyerSafeId) return;
+        updateBuyerById(selectedBuyerSafeId, current=>{
+          const filtered = (Array.isArray(current.__log) ? current.__log : Array.isArray(current.__history) ? current.__history : []).filter(entry=>entry.id!==id);
+          return {...current, __history:filtered, __log:filtered};
+        });
+      }
+      function handleMatchSelectedLead(){
+        if(!selectedLead || !selectedLeadId){
+          setBuyerStatus("Select a lead in the Leads tab first to match buyers.");
+          return;
+        }
+        setBuyerMatchLeadId(selectedLeadId);
+        setBuyerStatus(`Matching buyers for ${leadLabel(selectedLead)}`);
+      }
+      function handleClearLeadMatch(){
+        if(!buyerMatchLeadId){
+          setBuyerStatus(prev=> prev.startsWith("Select a lead") ? prev : "");
+          return;
+        }
+        setBuyerMatchLeadId(null);
+        setBuyerStatus("Lead match cleared.");
+      }
+      function handleAssignBuyer(lead, buyerId){
+        if(!lead) return;
+        const leadId = lead.__id;
+        const nextId = buyerId || null;
+        const prevId = lead.__assignedBuyerId || null;
+        if(prevId===nextId) return;
+        updateLeadById(leadId, current=>{
+          const history=Array.isArray(current.__log) ? current.__log.slice() : Array.isArray(current.__history) ? current.__history.slice() : [];
+          let entry=null;
+          if(nextId){
+            const buyer = buyers.find(b=>b.__id===nextId);
+            entry = makeHistoryEntry("Assignment", `Assigned to ${buyerLabel(buyer)}`);
+          }else if(prevId){
+            const prevBuyer = buyers.find(b=>b.__id===prevId);
+            entry = makeHistoryEntry("Assignment", `Unassigned from ${buyerLabel(prevBuyer)}`);
+          }
+          if(entry) history.unshift(entry);
+          return {...current, __assignedBuyerId:nextId, __history:history, __log:history};
+        });
+        if(prevId && prevId!==nextId){
+          updateBuyerById(prevId, current=>{
+            const history = Array.isArray(current.__log) ? current.__log.slice() : Array.isArray(current.__history) ? current.__history.slice() : [];
+            history.unshift(makeHistoryEntry("Lead Assignment", `Lead unassigned: ${leadLabel(lead)}`));
+            return {...current, __history:history, __log:history};
+          });
+        }
+        if(nextId){
+          updateBuyerById(nextId, current=>{
+            const history = Array.isArray(current.__log) ? current.__log.slice() : Array.isArray(current.__history) ? current.__history.slice() : [];
+            history.unshift(makeHistoryEntry("Lead Assignment", `Lead assigned: ${leadLabel(lead)}`));
+            return {...current, __history:history, __log:history};
+          });
+        }
+      }
 
       // Export
       function exportCSV(data, filename){
@@ -256,13 +878,6 @@
       }
 
       // Comps
-      function haversineMiles(lat1, lon1, lat2, lon2){
-        const toRad=(d)=>d*Math.PI/180, R=3958.8;
-        const dLat=toRad(lat2-lat1), dLon=toRad(lon2-lon1);
-        const a=Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
-        return 2*R*Math.atan2(Math.sqrt(a),Math.sqrt(1-a))*R/ R; // simplified below
-      }
-      // correct return:
       function distMiles(a1,b1,a2,b2){
         const toRad=(d)=>d*Math.PI/180, R=3958.8;
         const dLat=toRad(a2-a1), dLon=toRad(b2-b1);
@@ -288,31 +903,244 @@
       },[leads,selectedLead,compRadius]);
 
       // Geocode
-      const missingCount = useMemo(()=> leads.filter(l => typeof l?.Latitude!=='number' || typeof l?.Longitude!=='number').length, [leads]);
-      const buildQueryFromLead = (l)=> [l["Site Address"], l["County"]].filter(Boolean).join(", ") || String(l["APN"]||"").trim();
-      async function geocodeMissing(){
-        if(geocodeBusy) return;
-        const targets = leads.map((l,idx)=>({l,idx})).filter(x=> typeof x.l?.Latitude!=='number' || typeof x.l?.Longitude!=='number');
-        if(!targets.length) return;
-        setGeocodeBusy(true); setGeocodeProgress({done:0,total:targets.length});
-        const updated=leads.slice();
-        for(let i=0;i<targets.length;i++){
-          const {l,idx}=targets[i]; const q=buildQueryFromLead(l); if(!q){ setGeocodeProgress({done:i+1,total:targets.length}); continue; }
-          try{
-            const url=`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1&addressdetails=0&email=sample@example.com`;
-            const res=await fetch(url,{headers:{'Accept-Language':'en'}});
-            if(res.ok){
-              const js=await res.json();
-              if(Array.isArray(js) && js[0]){
-                const lat=Number(js[0].lat), lon=Number(js[0].lon);
-                if(Number.isFinite(lat)&&Number.isFinite(lon)){ updated[idx]={...updated[idx], Latitude:lat, Longitude:lon}; setLeads(updated.slice()); }
+      const bulkSelectionSet = useMemo(()=> new Set(bulkSelection), [bulkSelection]);
+      const selectionActive = bulkSelectionSet.size > 0;
+      const bulkSelectedCount = bulkSelectionSet.size;
+      const missingCount = useMemo(()=> computeGeocodeTargets(leads).length, [leads]);
+      const bulkSelectedMissingCount = useMemo(()=>{
+        if(!selectionActive) return 0;
+        return computeGeocodeTargets(leads, bulkSelectionSet).length;
+      },[leads, bulkSelectionSet, selectionActive]);
+      const filteredSelectionCount = useMemo(()=>{
+        if(!filteredLeads.length || !bulkSelection.length) return 0;
+        let count=0;
+        for(const lead of filteredLeads){
+          if(bulkSelectionSet.has(lead.__id)) count++;
+        }
+        return count;
+      },[filteredLeads, bulkSelection, bulkSelectionSet]);
+      const filteredMissingCount = useMemo(()=>{
+        if(!filteredLeads.length) return 0;
+        return filteredLeads.reduce((acc, lead)=> acc + (needsCoords(lead) ? 1 : 0), 0);
+      },[filteredLeads, needsCoords]);
+      const filteredMissingSelectedCount = useMemo(()=>{
+        if(!filteredLeads.length || !bulkSelection.length) return 0;
+        let count=0;
+        for(const lead of filteredLeads){
+          if(bulkSelectionSet.has(lead.__id) && needsCoords(lead)) count++;
+        }
+        return count;
+      },[filteredLeads, bulkSelection, bulkSelectionSet, needsCoords]);
+      const geocodeTargetCount = selectionActive ? bulkSelectedMissingCount : missingCount;
+      const geocodeButtonDisabled = geocodeBusy || geocodeTargetCount === 0;
+      const geocodeButtonLabel = geocodeBusy
+        ? `Geocoding ${geocodeProgress.done}/${geocodeProgress.total}…`
+        : selectionActive
+          ? `Geocode Selected (${bulkSelectedMissingCount})`
+          : `Geocode Missing (${missingCount})`;
+      const allFilteredSelected = filteredLeads.length>0 && filteredSelectionCount===filteredLeads.length;
+      useEffect(()=>{
+        if(selectAllRef.current){
+          selectAllRef.current.indeterminate = filteredSelectionCount>0 && !allFilteredSelected;
+        }
+      },[filteredSelectionCount, allFilteredSelected]);
+      const buildQueryFromLead = typeof CRM.buildGeocodeQuery === "function" ? CRM.buildGeocodeQuery : ((l)=>{
+        if(!l) return "";
+        const siteCity = l["City"] || l["Site City"];
+        const siteState = l["State"] || l["Site State"];
+        const siteZip = l["Zip"] || l["Site Zip"];
+        const cityState = [siteCity, siteState].filter(Boolean).join(", ");
+        if(l["Site Address"]){
+          const parts = [l["Site Address"]];
+          if(cityState) parts.push(cityState);
+          if(siteZip) parts.push(siteZip);
+          if(l["County"]) parts.push(`${l["County"]} County`);
+          return parts.join(", ");
+        }
+        const mailingParts = [l["Street Address"], cityState, siteZip].filter(Boolean);
+        if(mailingParts.length){
+          if(l["County"]){
+            mailingParts.push(`${l["County"]} County`);
+          }
+          return mailingParts.join(", ");
+        }
+        const apn = String(l["APN"]||"").trim();
+        if(apn) return apn;
+        return String(l["Owner Name"]||"").trim();
+      });
+      const toggleBulkSelection = (id, checked)=>{
+        if(!id) return;
+        setBulkSelection(prev=>{
+          const next = new Set(prev);
+          const before = next.size;
+          if(checked){
+            next.add(id);
+          }else{
+            next.delete(id);
+          }
+          return next.size===before ? prev : Array.from(next);
+        });
+      };
+      const clearBulkSelection = ()=>{
+        setBulkSelection(prev=> prev.length ? [] : prev);
+      };
+      const toggleSelectFiltered = (checked)=>{
+        setBulkSelection(prev=>{
+          if(!filteredLeads.length) return prev;
+          const next = new Set(prev);
+          let changed=false;
+          if(checked){
+            for(const lead of filteredLeads){
+              if(!next.has(lead.__id)){
+                next.add(lead.__id);
+                changed=true;
               }
             }
-          }catch(e){ console.warn("Geocode failed for", q, e); }
+          }else{
+            for(const lead of filteredLeads){
+              if(next.delete(lead.__id)) changed=true;
+            }
+          }
+          return changed ? Array.from(next) : prev;
+        });
+      };
+      const selectFilteredMissing = ()=>{
+        if(!filteredLeads.length) return;
+        setBulkSelection(prev=>{
+          const next = new Set(prev);
+          let changed=false;
+          for(const lead of filteredLeads){
+            if(!leadHasCoordinates(lead) && !next.has(lead.__id)){
+              next.add(lead.__id);
+              changed=true;
+            }
+          }
+          return changed ? Array.from(next) : prev;
+        });
+      };
+      async function lookupCoords(query){
+        if(!query) return null;
+        const cache = geocodeCacheRef.current;
+        if(cache.has(query)) return cache.get(query);
+        for(const provider of GEOCODE_PROVIDERS){
+          try{
+            const url = provider.buildUrl(query);
+            if(typeof CRM.awaitGeocodeWindow === "function"){
+              await CRM.awaitGeocodeWindow();
+            }else{
+              const throttleMs = typeof provider.throttleMs === "number" ? provider.throttleMs : GEOCODE_THROTTLE_MS;
+              if(throttleMs>0){
+                const now = Date.now();
+                const elapsed = now - geocodeThrottleRef.current.last;
+                if(geocodeThrottleRef.current.last && elapsed < throttleMs){
+                  await sleep(throttleMs - elapsed);
+                }
+              }
+            }
+            const res = await fetch(url,{headers:{'Accept':'application/json'}});
+            geocodeThrottleRef.current.last = Date.now();
+            if(!res.ok) continue;
+            const data = await res.json();
+            const coords = provider.parse(data);
+            if(coords){
+              const lat = normalizeLatitude(coords.lat ?? coords.latitude);
+              const lon = normalizeLongitude(coords.lon ?? coords.lng ?? coords.longitude);
+              if(coordinatesLookValid(lat, lon)){
+                const result = {lat, lon, provider:provider.name};
+                cache.set(query, result);
+                return result;
+              }
+            }
+          }catch(err){
+            console.warn(`Geocode provider ${provider.name} failed for ${query}`, err);
+          }
+        }
+        cache.set(query, null);
+        return null;
+      }
+      async function geocodeMissing(){
+        if(geocodeBusy) return;
+        let targets = [];
+        let usingSelection = false;
+        if(selectionActive){
+          targets = computeGeocodeTargets(leads, bulkSelectionSet);
+          usingSelection = true;
+          if(!targets.length){
+            setGeocodeStatus("Selected leads already have coordinates.");
+            return;
+          }
+        }else{
+          targets = computeGeocodeTargets(leads);
+          if(!targets.length){
+            setGeocodeStatus("All leads already have coordinates.");
+            return;
+          }
+        }
+        setGeocodeBusy(true);
+        setGeocodeStatus(usingSelection ? "Starting geocode for selected leads via OpenStreetMap…" : "Starting OpenStreetMap geocode run…");
+        setGeocodeProgress({done:0,total:targets.length});
+        let successCount=0, failCount=0, skippedCount=0;
+        let lastProvider="";
+        const successes=[];
+        for(let i=0;i<targets.length;i++){
+          const {l,idx}=targets[i];
+          const q=buildQueryFromLead(l);
+          if(!q){
+            skippedCount++;
+            setGeocodeProgress({done:i+1,total:targets.length});
+            continue;
+          }
+          try{
+            const coords = await lookupCoords(q);
+            if(coords){
+              lastProvider = coords.provider || lastProvider;
+              const lat = normalizeLatitude(coords.lat ?? coords.latitude);
+              const lon = normalizeLongitude(coords.lon ?? coords.lng ?? coords.longitude);
+              if(coordinatesLookValid(lat, lon)){
+                successes.push({id: l.__id, lat, lon, provider: coords.provider || lastProvider || ""});
+                successCount++;
+              }else{
+                failCount++;
+              }
+            }else{
+              failCount++;
+            }
+          }catch(e){
+            failCount++;
+            console.warn("Geocode failed for", q, e);
+          }
           setGeocodeProgress({done:i+1,total:targets.length});
-          await new Promise(r=>setTimeout(r,1200));
+        }
+        if(successes.length){
+          const byId = new Map(successes.map(item=>[item.id, item]));
+          setLeads(prev=>{
+            let mutated=false;
+            const next = prev.map(lead=>{
+              const update = byId.get(lead.__id);
+              if(!update) return lead;
+              const applied = applyGeocodeResult(lead, update);
+              if(applied !== lead) mutated = true;
+              return applied;
+            });
+            return mutated ? next : prev;
+          });
+          const successIds = successes.map(item=>item.id);
+          setBulkSelection(prev=>{
+            const next = new Set(prev);
+            let mutated=false;
+            for(const id of successIds){
+              if(next.delete(id)) mutated=true;
+            }
+            return mutated ? Array.from(next) : prev;
+          });
         }
         setGeocodeBusy(false);
+        const pieces=[];
+        if(successCount) pieces.push(`Geocoded ${successCount} of ${targets.length} leads${lastProvider?` via ${lastProvider}`:""}.`);
+        if(failCount) pieces.push(`${failCount} queries had no match.`);
+        if(skippedCount) pieces.push(`${skippedCount} missing enough address info.`);
+        if(!pieces.length) pieces.push("No coordinates found. Add more address details and try again.");
+        setGeocodeStatus(pieces.join(" "));
       }
 
       // UI
@@ -323,6 +1151,7 @@
             <button className={tab==="leads"?"active":""} onClick={()=>setTab("leads")}>Leads</button>
             <button className={tab==="buyers"?"active":""} onClick={()=>setTab("buyers")}>Buyers</button>
           </div>
+          <div className="muted small mb-16">💾 All changes auto-save to this browser. Use the Load Sample buttons to restore the demo dataset.</div>
 
           {tab==="leads" ? (
             <>
@@ -341,11 +1170,47 @@
                   {leadCounties.map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
                 <button className="btn brand" onClick={()=>exportCSV(leads,"Wholesale_Land_Leads.csv")}>Export CSV</button>
-                <button className="btn ghost" onClick={()=>{setLeads(sampleLeads); setSelectedIndex(0);}}>Load Sample</button>
-                <button className="btn" disabled={geocodeBusy||missingCount===0} onClick={geocodeMissing}>
-                  {geocodeBusy? `Geocoding ${geocodeProgress.done}/${geocodeProgress.total}…` : `Geocode Missing (${missingCount})`}
+                <button className="btn ghost" onClick={()=>{const sample=sampleLeads.map(cleanLeadRecord); setLeads(sample); setSelectedIndex(0); setBulkSelection([]);}}>Load Sample</button>
+                <button className="btn" disabled={geocodeButtonDisabled} onClick={geocodeMissing}>
+                  {geocodeButtonLabel}
                 </button>
               </div>
+              {geocodeStatus && (
+                <div className="muted" style={{fontSize:"12px", marginTop:"-8px", marginBottom:"8px"}}>{geocodeStatus}</div>
+              )}
+              {(filteredLeads.length || bulkSelectedCount) && (
+                <div className="row small" style={{marginBottom:"12px", gap:"8px", alignItems:"center", flexWrap:"wrap"}}>
+                  <div>
+                    <strong>{bulkSelectedCount}</strong> selected
+                    {bulkSelectedMissingCount ? ` • ${bulkSelectedMissingCount} missing lat/lon` : ""}
+                    {filteredLeads.length ? ` • In view: ${filteredSelectionCount}/${filteredLeads.length}` : ""}
+                  </div>
+                  <button
+                    className="btn ghost"
+                    style={{padding:"6px 10px", fontSize:"12px"}}
+                    onClick={()=>toggleSelectFiltered(!allFilteredSelected)}
+                    disabled={!filteredLeads.length}
+                  >
+                    {allFilteredSelected ? "Unselect Filtered" : "Select Filtered"}
+                  </button>
+                  <button
+                    className="btn ghost"
+                    style={{padding:"6px 10px", fontSize:"12px"}}
+                    onClick={selectFilteredMissing}
+                    disabled={!filteredMissingCount}
+                  >
+                    {filteredMissingSelectedCount ? `Select Missing (${filteredMissingSelectedCount}/${filteredMissingCount})` : `Select Missing (${filteredMissingCount})`}
+                  </button>
+                  <button
+                    className="btn ghost"
+                    style={{padding:"6px 10px", fontSize:"12px"}}
+                    onClick={clearBulkSelection}
+                    disabled={!bulkSelectedCount}
+                  >
+                    Clear Selection
+                  </button>
+                </div>
+              )}
 
               <div className="grid grid-2">
                 <div className="card hview">
@@ -355,91 +1220,241 @@
                   </div>
                   <div className="scroll">
                     <table>
-                      <thead><tr><th>Owner</th><th>County</th><th>Site Address</th><th>Est. Value</th></tr></thead>
+                      <thead>
+                        <tr>
+                          <th style={{width:"36px", textAlign:"center"}}>
+                            <input
+                              type="checkbox"
+                              ref={selectAllRef}
+                              checked={allFilteredSelected && !!filteredLeads.length}
+                              onChange={e=>toggleSelectFiltered(e.target.checked)}
+                              aria-checked={allFilteredSelected ? "true" : (filteredSelectionCount>0 ? "mixed" : "false")}
+                            />
+                          </th>
+                          <th>Owner</th>
+                          <th>County</th>
+                          <th>Site Address</th>
+                          <th>Est. Value</th>
+                        </tr>
+                      </thead>
                       <tbody>
-                        {filteredLeads.map((l,i)=>(
-                          <tr key={(l["APN"]||"")+i} className={i===selectedIndex?"selected":""} onClick={()=>setSelectedIndex(i)} style={{cursor:"pointer"}}>
+                        {filteredLeads.map((l,i)=>{
+                          const id=l.__id;
+                          const inBulk=bulkSelectionSet.has(id);
+                          return (
+                          <tr key={id || (l["APN"]||"")+i} className={i===selectedIndexSafe?"selected":""} onClick={()=>setSelectedIndex(i)} style={{cursor:"pointer"}}>
+                            <td style={{textAlign:"center"}} onClick={e=>e.stopPropagation()}>
+                              <input
+                                type="checkbox"
+                                checked={inBulk}
+                                onChange={e=>{e.stopPropagation(); toggleBulkSelection(id, e.target.checked);}}
+                              />
+                            </td>
                             <td>{l["Owner Name"]||"—"}</td>
                             <td>{l["County"]||"—"}</td>
                             <td>{l["Site Address"]||"—"}</td>
                             <td>{l["Estimated Market Value"]||"—"}</td>
                           </tr>
-                        ))}
-                        {!filteredLeads.length && <tr><td colSpan="4" className="center" style={{padding:"24px"}}>No leads match your filters.</td></tr>}
+                        );})}
+                        {!filteredLeads.length && <tr><td colSpan="5" className="center" style={{padding:"24px"}}>No leads match your filters.</td></tr>}
                       </tbody>
                     </table>
                   </div>
                 </div>
 
                 <div className="card hview">
-                  <div className="hd">
-                    <div>🗺️ Map & Details</div>
-                    <div className="row small">
-                      <label><input type="checkbox" checked={mapEnabled} onChange={e=>setMapEnabled(e.target.checked)} /> Map</label>
-                      <label>Map Type:
-                        <select value={mapType} onChange={e=>setMapType(e.target.value)}>
-                          <option value="street">Street</option>
-                          <option value="satellite">Satellite</option>
-                        </select>
-                      </label>
-                    </div>
-                  </div>
-                  <div style={{display:"grid",gridTemplateRows:"1fr auto auto"}}>
-                    <div className="center" style={{position:"relative"}}>
-                      {mapEnabled && mapURL
-                        ? <iframe title="map" src={mapURL} style={{border:0,width:"100%",height:"100%"}} loading="lazy" referrerPolicy="no-referrer-when-downgrade"></iframe>
-                        : <div className="muted" style={{padding:"24px",textAlign:"center"}}>Provide coordinates to view map.</div>}
-                    </div>
+                  <div className="scroll" style={{padding:"12px"}}>
+                    {selectedLead ? (
+                      <>
+                        <details className="panel" open>
+                          <summary>🗺️ Map & Details</summary>
+                          <div className="panel-body">
+                            <div className="row small" style={{justifyContent:"flex-end", gap:"12px", marginBottom:"12px"}}>
+                              <label><input type="checkbox" checked={mapEnabled} onChange={e=>setMapEnabled(e.target.checked)} /> Map</label>
+                              <label>Map Type:
+                                <select value={mapType} onChange={e=>setMapType(e.target.value)}>
+                                  <option value="street">Street</option>
+                                  <option value="satellite">Satellite</option>
+                                </select>
+                                </label>
+                            </div>
+                            <div style={{border:"1px solid var(--line)", borderRadius:"12px", overflow:"hidden", minHeight:"260px", background:"#fff", marginBottom:"12px"}}>
+                              {mapEnabled && mapURL ? (
+                                <iframe title="map" src={mapURL} style={{border:0,width:"100%",height:"100%",minHeight:"260px"}} loading="lazy" referrerPolicy="no-referrer-when-downgrade"></iframe>
+                              ) : (
+                                <div className="muted" style={{padding:"24px",textAlign:"center"}}>Provide coordinates to view map.</div>
+                              )}
+                            </div>
+                            <div style={{display:"grid", gap:"12px", gridTemplateColumns:"repeat(auto-fit, minmax(180px, 1fr))"}}>
+                              <Info label="Owner" value={selectedLead?.["Owner Name"]} />
+                              <Info label="County" value={selectedLead?.["County"]} />
+                              <Info label="Address" value={selectedLead?.["Site Address"]} />
+                              <Info label="APN" value={selectedLead?.["APN"]} />
+                              <Info label="Acreage" value={selectedLead?.["Acreage"]} />
+                              <Info label="Est. Value" value={selectedLead?.["Estimated Market Value"]} />
+                              <Info label="Latitude" value={String(selectedLead?.["Latitude"] ?? "")} />
+                              <Info label="Longitude" value={String(selectedLead?.["Longitude"] ?? "")} />
+                            </div>
+                          </div>
+                        </details>
 
-                    <div className="row-details">
-                      <Info label="Owner" value={selectedLead?.["Owner Name"]} />
-                      <Info label="County" value={selectedLead?.["County"]} />
-                      <Info label="Address" value={selectedLead?.["Site Address"]} />
-                      <Info label="APN" value={selectedLead?.["APN"]} />
-                      <Info label="Acreage" value={selectedLead?.["Acreage"]} />
-                      <Info label="Est. Value" value={selectedLead?.["Estimated Market Value"]} />
-                      <Info label="Latitude" value={String(selectedLead?.["Latitude"] ?? "")} />
-                      <Info label="Longitude" value={String(selectedLead?.["Longitude"] ?? "")} />
-                    </div>
+                        <details className="panel">
+                          <summary>📞 Contact Details</summary>
+                          <div className="panel-body">
+                            {selectedLeadHasDNC ? (
+                              <div className="muted" style={{color:"#b91c1c", fontWeight:600, marginBottom:"8px"}}>DNC flagged. Respect do-not-contact preferences.</div>
+                            ) : null}
+                            <div style={{display:"grid", gap:"12px", gridTemplateColumns:"repeat(auto-fit, minmax(240px, 1fr))"}}>
+                              <div>
+                                <div className="muted" style={{fontSize:"11px", textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:"6px"}}>Phones</div>
+                                {selectedLeadPhones.length ? (
+                                  <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>
+                                    {selectedLeadPhones.map(phone=>(
+                                      <div key={`${phone.field}-${phone.href}`} className="contact-item">
+                                        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+                                          <span style={{fontWeight:600}}>{phone.value}</span>
+                                          <div>
+                                            {phone.isPrimary && <span className="badge primary">Primary</span>}
+                                            {phone.isDNC && <span className="badge danger">DNC</span>}
+                                          </div>
+                                        </div>
+                                        <div className="muted" style={{fontSize:"11px", marginTop:"4px"}}>{phone.field}</div>
+                                        <div className="contact-actions">
+                                          <a className="btn ghost" href={`tel:${phone.href}`}>Call</a>
+                                          <a className="btn ghost" href={`sms:${phone.href}`}>Text</a>
+                                          <button className="btn ghost" type="button" onClick={()=>copyToClipboard(phone.value)}>Copy</button>
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <div className="muted small">No phone numbers yet.</div>
+                                )}
+                              </div>
+                              <div>
+                                <div className="muted" style={{fontSize:"11px", textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:"6px"}}>Emails</div>
+                                {selectedLeadEmails.length ? (
+                                  <div style={{display:"flex", flexDirection:"column", gap:"8px"}}>
+                                    {selectedLeadEmails.map(email=>(
+                                      <div key={`${email.field}-${email.value}`} className="contact-item">
+                                        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+                                          <span style={{fontWeight:600}}>{email.value}</span>
+                                          {email.isPrimary && <span className="badge primary">Primary</span>}
+                                        </div>
+                                        <div className="muted" style={{fontSize:"11px", marginTop:"4px"}}>{email.field}</div>
+                                        <div className="contact-actions">
+                                          <a className="btn ghost" href={`mailto:${encodeURIComponent(email.value)}`}>Email</a>
+                                          <button className="btn ghost" type="button" onClick={()=>copyToClipboard(email.value)}>Copy</button>
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <div className="muted small">No emails yet.</div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </details>
 
-                    <div style={{borderTop:"1px solid var(--line)",padding:"12px"}}>
-                      <div className="row mb-8">
-                        {["New","Attempted","Contacted","Offer Sent","Under Contract","Dead"].map(s=>(
-                          <span key={s} className={"chip "+(selectedLead?.Status===s?"active":"")} onClick={()=>{
-                            const idx=leads.indexOf(selectedLead); const clone=leads.slice(); clone[idx]={...selectedLead, Status:s}; setLeads(clone);
-                          }}>{s}</span>
-                        ))}
-                      </div>
-                      <div className="row mb-8">
-                        <input className="input" placeholder="Next Action (e.g., Call Tue 10am)" value={selectedLead?.__nextAction||''}
-                          onChange={e=>{ const idx=leads.indexOf(selectedLead); const clone=leads.slice(); clone[idx]={...selectedLead,__nextAction:e.target.value}; setLeads(clone);} }/>
-                        <input type="date" value={selectedLead?.__lastContacted||''}
-                          onChange={e=>{ const idx=leads.indexOf(selectedLead); const clone=leads.slice(); clone[idx]={...selectedLead,__lastContacted:e.target.value}; setLeads(clone);} }/>
-                      </div>
-                      <textarea className="note" placeholder="Notes…" value={selectedLead?.__notes||''}
-                        onChange={e=>{ const idx=leads.indexOf(selectedLead); const clone=leads.slice(); clone[idx]={...selectedLead,__notes:e.target.value}; setLeads(clone);} }></textarea>
-
-                      <div className="row mt-16 mb-8" style={{justifyContent:"space-between"}}>
-                        <div style={{fontWeight:600}}>📌 Nearby Comps</div>
-                        <div className="row small">
-                          <span>Radius (miles)</span>
-                          <input className="w-20" type="number" min="1" step="1" value={compRadius}
-                            onChange={e=>setCompRadius(Math.max(1, Number(e.target.value)||1))}/>
-                        </div>
-                      </div>
-                      {comps.length ? (
-                        <div className="table-lite">
-                          <table>
-                            <thead><tr><th>Dist (mi)</th><th>Owner</th><th>Address</th><th>County</th><th>Est. Value</th><th>Acreage</th></tr></thead>
-                            <tbody>
-                              {comps.map((c,i)=>(
-                                <tr key={i}><td>{c.distance.toFixed(2)}</td><td>{c.owner}</td><td>{c.address}</td><td>{c.county}</td><td>{c.value||"—"}</td><td>{c.acreage||"—"}</td></tr>
+                        <details className="panel">
+                          <summary>✉️ Communication History</summary>
+                          <div className="panel-body">
+                            <div className="row mb-8" style={{gap:"8px"}}>
+                              {["New","Attempted","Contacted","Offer Sent","Under Contract","Dead"].map(s=>(
+                                <span key={s} className={"chip "+(selectedLead?.Status===s?"active":"")} onClick={()=>{
+                                  if(!selectedLeadId) return;
+                                  updateLeadById(selectedLeadId, current=>{
+                                    if(current.Status===s) return current;
+                                    const baseHistory = Array.isArray(current.__log) ? current.__log.slice() : Array.isArray(current.__history) ? current.__history.slice() : [];
+                                    const entry = makeHistoryEntry("Status", `Status changed to ${s}`);
+                                    baseHistory.unshift(entry);
+                                    return {...current, Status:s, __history:baseHistory, __log:baseHistory};
+                                  });
+                                }}>{s}</span>
                               ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      ) : <div className="muted">No comps found within {compRadius} miles.</div> }
-                    </div>
+                            </div>
+                            <div className="row mb-8">
+                              <input className="input" placeholder="Next Action (e.g., Call Tue 10am)" value={selectedLead?.__nextAction||""}
+                                onChange={e=>{ if(!selectedLeadId) return; updateLeadById(selectedLeadId, current=>({...current,__nextAction:e.target.value})); }} />
+                              <input type="date" value={selectedLead?.__lastContacted||""}
+                                onChange={e=>{ if(!selectedLeadId) return; updateLeadById(selectedLeadId, current=>({...current,__lastContacted:e.target.value})); }} />
+                            </div>
+                            {selectedLead?.__notes ? (
+                              <div className="mb-8" style={{background:"#f1f5f9", borderRadius:"12px", padding:"12px"}}>
+                                <div className="muted" style={{fontSize:"11px", textTransform:"uppercase", letterSpacing:"0.05em"}}>Pinned Note</div>
+                                <div style={{whiteSpace:"pre-wrap", marginTop:"4px"}}>{selectedLead.__notes}</div>
+                              </div>
+                            ) : null}
+
+                            <div className="row mt-16 mb-8" style={{alignItems:"center", justifyContent:"space-between"}}>
+                              <div style={{fontWeight:600}}>🤝 Assign to Buyer</div>
+                              {assignedBuyer && <div className="muted" style={{fontSize:"12px"}}>Assigned to: {buyerLabel(assignedBuyer)}</div>}
+                            </div>
+                            <div className="row mb-8" style={{alignItems:"center"}}>
+                              <select value={selectedLead?.__assignedBuyerId||""} onChange={e=>handleAssignBuyer(selectedLead, e.target.value)} style={{minWidth:"200px"}}>
+                                <option value="">Unassigned</option>
+                                {buyers.map(b=>(<option key={b.__id} value={b.__id}>{buyerLabel(b)}</option>))}
+                              </select>
+                            </div>
+                            {matchingBuyers.length ? (
+                              <div className="mb-8">
+                                <div className="muted" style={{fontSize:"12px", marginBottom:"4px"}}>Suggested buyers (click to assign)</div>
+                                <div className="row" style={{gap:"8px"}}>
+                                  {matchingBuyers.slice(0,6).map(b=>(
+                                    <span key={b.__id} className={"chip "+(selectedLead?.__assignedBuyerId===b.__id?"active":"")} onClick={()=>handleAssignBuyer(selectedLead, b.__id)}>{buyerLabel(b)}</span>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : null}
+
+                            <div className="row mt-16 mb-8" style={{justifyContent:"space-between", alignItems:"center"}}>
+                              <div style={{fontWeight:600}}>📝 History Log</div>
+                            </div>
+                            <HistoryLog
+                              entries={selectedLead?.__log || selectedLead?.__history || []}
+                              type={leadLogType}
+                              text={leadLogText}
+                              date={leadLogDate}
+                              onTypeChange={setLeadLogType}
+                              onTextChange={setLeadLogText}
+                              onDateChange={setLeadLogDate}
+                              onAdd={handleAddLeadHistory}
+                              onDelete={handleDeleteLeadHistory}
+                              placeholder="Add call notes, offer details, or follow-up tasks"
+                              types={["Call","Text","Email","Note"]}
+                            />
+                          </div>
+                        </details>
+
+                        <details className="panel">
+                          <summary>📌 Nearby Comps</summary>
+                          <div className="panel-body">
+                            <div className="row small" style={{justifyContent:"flex-end", marginBottom:"12px"}}>
+                              <span>Radius (miles)</span>
+                              <input className="w-20" type="number" min="1" step="1" value={compRadius}
+                                onChange={e=>setCompRadius(Math.max(1, Number(e.target.value)||1))}/>
+                            </div>
+                            {comps.length ? (
+                              <div className="table-lite">
+                                <table>
+                                  <thead><tr><th>Dist (mi)</th><th>Owner</th><th>Address</th><th>County</th><th>Est. Value</th><th>Acreage</th></tr></thead>
+                                  <tbody>
+                                    {comps.map((c,i)=>(
+                                      <tr key={i}><td>{c.distance.toFixed(2)}</td><td>{c.owner}</td><td>{c.address}</td><td>{c.county}</td><td>{c.value||"—"}</td><td>{c.acreage||"—"}</td></tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            ) : (
+                              <div className="muted">No comps found within {compRadius} miles.</div>
+                            )}
+                          </div>
+                        </details>
+                      </>
+                    ) : (
+                      <div className="muted" style={{padding:"24px", textAlign:"center"}}>Select a lead from the table to view details.</div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -470,32 +1485,103 @@
                 <input className="input" placeholder="Min Price" value={minPrice} onChange={e=>setMinPrice(e.target.value)} />
                 <input className="input" placeholder="Max Price" value={maxPrice} onChange={e=>setMaxPrice(e.target.value)} />
                 <button className="btn brand" onClick={()=>exportCSV(buyers,"Wholesale_Land_Buyers.csv")}>Export CSV</button>
+                <button className="btn ghost" onClick={()=>{
+                  const sample = sampleBuyers.map(cleanBuyerRecord);
+                  setBuyers(sample);
+                  setSelectedBuyerId(sample[0]?.__id || null);
+                }}>Load Sample</button>
+                <button className="btn indigo" onClick={handleMatchSelectedLead}>Match To Selected Lead</button>
+                <button className="btn ghost" onClick={handleClearLeadMatch}>Clear Lead Match</button>
               </div>
 
-              <div className="card">
-                <div className="hd">🧰 Buyers ({filteredBuyers.length})</div>
-                <div style={{maxHeight:"78vh",overflow:"auto"}}>
-                  <table>
-                    <thead><tr><th>Buyer / Company</th><th>Counties</th><th>Acres</th><th>Price</th><th>Funding</th><th>Contact</th></tr></thead>
-                    <tbody>
-                      {filteredBuyers.map((b,i)=>(
-                        <tr key={(b["Buyer Name / Company"]||i)+"-"+i}>
-                          <td>{b["Buyer Name / Company"]||"—"}</td>
-                          <td>{b["Buy Box - Counties"]||"—"}</td>
-                          <td>{[b["Min Acres"], b["Max Acres"]].filter(Boolean).join(" - ") || "—"}</td>
-                          <td>{[b["Min Price"], b["Max Price"]].filter(Boolean).join(" - ") || "—"}</td>
-                          <td>{b["Funding Type (Cash/Hard Money)"]||"—"}</td>
-                          <td>{[b["Phone"], b["Email"]].filter(Boolean).join(" | ") || "—"}</td>
-                        </tr>
-                      ))}
-                      {!filteredBuyers.length && <tr><td colSpan="6" className="center" style={{padding:"24px"}}>No buyers match your filters.</td></tr>}
-                    </tbody>
-                  </table>
+              {buyerStatus ? (
+                <div className="muted" style={{marginTop:"-8px", marginBottom:"8px"}}>{buyerStatus}</div>
+              ) : null}
+
+
+              <div className="grid grid-2">
+                <div className="card hview">
+                  <div className="hd">🧰 Buyers ({filteredBuyers.length})</div>
+                  <div className="scroll">
+                    <table>
+                      <thead><tr><th>Buyer / Company</th><th>Counties</th><th>Acres</th><th>Price</th><th>Funding</th><th>Contact</th></tr></thead>
+                      <tbody>
+                        {filteredBuyers.map(b=>(
+                          <tr key={b.__id} className={selectedBuyerSafeId===b.__id?"selected":""} onClick={()=>setSelectedBuyerId(b.__id)} style={{cursor:"pointer"}}>
+                            <td>{b["Buyer Name / Company"]||"—"}</td>
+                            <td>{b["Buy Box - Counties"]||"—"}</td>
+                            <td>{[b["Min Acres"], b["Max Acres"]].filter(Boolean).join(" - ") || "—"}</td>
+                            <td>{[b["Min Price"], b["Max Price"]].filter(Boolean).join(" - ") || "—"}</td>
+                            <td>{b["Funding Type (Cash/Hard Money)"]||"—"}</td>
+                            <td>{[b["Phone"], b["Email"]].filter(Boolean).join(" | ") || "—"}</td>
+                          </tr>
+                        ))}
+                        {!filteredBuyers.length && <tr><td colSpan="6" className="center" style={{padding:"24px"}}>No buyers match your filters.</td></tr>}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="card hview">
+                  <div className="hd">📇 Buyer Details</div>
+                  <div className="scroll" style={{padding:"12px"}}>
+                    {selectedBuyer ? (
+                      <div>
+                        <div className="row-details">
+                          <Info label="Company / Buyer" value={selectedBuyer["Buyer Name / Company"]} />
+                          <Info label="Buy Counties" value={selectedBuyer["Buy Box - Counties"]} />
+                          <Info label="Buy States" value={selectedBuyer["Buy Box - States"]} />
+                          <Info label="Acreage" value={[selectedBuyer["Min Acres"], selectedBuyer["Max Acres"]].filter(Boolean).join(" - ") || ""} />
+                          <Info label="Price Range" value={[selectedBuyer["Min Price"], selectedBuyer["Max Price"]].filter(Boolean).join(" - ") || ""} />
+                          <Info label="Funding" value={selectedBuyer["Funding Type (Cash/Hard Money)"]} />
+                          <Info label="Phone" value={selectedBuyer["Phone"]} />
+                          <Info label="Email" value={selectedBuyer["Email"]} />
+                        </div>
+
+                        {selectedBuyer.__notes ? (
+                          <div className="mt-16" style={{background:"#f1f5f9", borderRadius:"12px", padding:"12px"}}>
+                            <div className="muted" style={{fontSize:"11px", textTransform:"uppercase", letterSpacing:"0.05em"}}>Pinned Note</div>
+                            <div style={{whiteSpace:"pre-wrap", marginTop:"4px"}}>{selectedBuyer.__notes}</div>
+                          </div>
+                        ) : null}
+
+                        <div className="mt-16">
+                          <div style={{fontWeight:600}} className="mb-8">📁 Assigned Leads</div>
+                          {assignedLeadsForBuyer.length ? (
+                            <div style={{maxHeight:"180px", overflow:"auto", border:"1px solid var(--line)", borderRadius:"12px", padding:"8px"}}>
+                              {assignedLeadsForBuyer.map(lead=>(
+                                <div key={lead.__id} style={{borderBottom:"1px solid var(--line)", padding:"6px 4px"}}>
+                                  <div style={{fontWeight:600}}>{lead["Owner Name"]||"—"}</div>
+                                  <div className="muted" style={{fontSize:"12px"}}>{[lead["Site Address"]||"—", lead.County||"—", lead.Status||"—"].join(" · ")}</div>
+                                </div>
+                              ))}
+                            </div>
+                          ) : <div className="muted">No leads assigned yet.</div>}
+                        </div>
+
+                        <div className="mt-16">
+                          <div style={{fontWeight:600}} className="mb-8">📝 History Log</div>
+                          <HistoryLog
+                            entries={selectedBuyer.__log || selectedBuyer.__history || []}
+                            type={buyerLogType}
+                            text={buyerLogText}
+                            date={buyerLogDate}
+                            onTypeChange={setBuyerLogType}
+                            onTextChange={setBuyerLogText}
+                            onDateChange={setBuyerLogDate}
+                            onAdd={handleAddBuyerHistory}
+                            onDelete={handleDeleteBuyerHistory}
+                            placeholder="Add call notes, funding updates, or deal progress"
+                            types={["Call","Text","Email","Note"]}
+                          />
+                        </div>
+                      </div>
+                    ) : <div className="muted" style={{padding:"24px"}}>No buyer selected.</div>}
+                  </div>
                 </div>
               </div>
-
               <div className="card mt-16" style={{padding:"16px"}}>
-                <AddBuyerForm onAdd={(obj)=> setBuyers(prev=>prev.concat([obj])) }/>
+                <AddBuyerForm onAdd={(obj)=> setBuyers(prev=>prev.concat([cleanBuyerRecord(obj)])) }/>
               </div>
 
               <div className="card mt-16" style={{padding:"16px"}}>
@@ -527,6 +1613,55 @@
       );
     }
 
+
+    function HistoryLog({entries, type, text, date, onTypeChange, onTextChange, onDateChange, onAdd, onDelete, placeholder, types}){
+      const sorted = React.useMemo(()=>{
+        if(!Array.isArray(entries)) return [];
+        return entries.slice().sort((a,b)=>{
+          const ta=Date.parse(b.timestamp||'');
+          const tb=Date.parse(a.timestamp||'');
+          return (Number.isFinite(ta)?ta:0)-(Number.isFinite(tb)?tb:0);
+        });
+      },[entries]);
+      const options = Array.isArray(types) && types.length ? types : HISTORY_TYPES;
+      return (
+        <div>
+          <div className="row mb-8" style={{alignItems:"flex-start"}}>
+            <select value={type} onChange={e=>onTypeChange?.(e.target.value)} style={{minWidth:"140px"}}>
+              {options.map(opt=><option key={opt} value={opt}>{opt}</option>)}
+            </select>
+            <textarea className="note" style={{flex:1, height:"72px"}} placeholder={placeholder||"Add note"} value={text||""}
+              onChange={e=>onTextChange?.(e.target.value)}></textarea>
+            <div style={{display:"flex", flexDirection:"column", gap:"4px"}}>
+              <label className="muted" style={{fontSize:"11px"}}>Next action date</label>
+              <input type="date" value={date||""} onChange={e=>onDateChange?.(e.target.value)} />
+            </div>
+            <button className="btn indigo" onClick={onAdd} disabled={!String(text||"").trim()}>Log</button>
+          </div>
+          <div style={{maxHeight:"220px", overflow:"auto", border:"1px solid var(--line)", borderRadius:"12px", padding:"8px", background:"#fff"}}>
+            {sorted.length ? sorted.map((entry,idx)=>{
+              const dateLabel = formatDateTime(entry.timestamp);
+              return (
+                <div key={entry.id} style={{borderBottom:idx===sorted.length-1?"none":"1px solid var(--line)", padding:"8px 4px"}}>
+                  <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"4px"}}>
+                    <div style={{fontWeight:600}}>{entry.type||"Note"}</div>
+                    <div className="muted" style={{fontSize:"11px"}}>{dateLabel}</div>
+                  </div>
+                  <div style={{whiteSpace:"pre-wrap"}}>{entry.note||"—"}</div>
+                  {entry.nextActionDate ? <div className="muted" style={{fontSize:"11px", marginTop:"4px"}}>Next action: {entry.nextActionDate}</div> : null}
+                  {onDelete && (
+                    <div className="row" style={{justifyContent:"flex-end", marginTop:"6px"}}>
+                      <button className="btn ghost" style={{padding:"4px 8px", fontSize:"12px"}} onClick={()=>onDelete(entry.id)}>Remove</button>
+                    </div>
+                  )}
+                </div>
+              );
+            }) : <div className="muted" style={{textAlign:"center", padding:"16px"}}>No history yet.</div>}
+          </div>
+        </div>
+      );
+    }
+
     function AddBuyerForm({onAdd}){
       const [form,setForm]=React.useState({"Buyer Name / Company":"","Phone":"","Email":"","Buy Box - Counties":"","Buy Box - States":"","Min Acres":"","Max Acres":"","Min Price":"","Max Price":"","Funding Type (Cash/Hard Money)":""
       });
@@ -552,23 +1687,19 @@
         <div className="card mt-16" style={{padding:"16px"}}>
           <div style={{fontWeight:600}} className="mb-8">✅ Built-in Test Cases</div>
           <ul>
-            <li>Load Sample → click rows → map shows by default; toggle Street/Satellite.</li>
-            <li>Upload your PropStream contact export CSV → rows & contact details appear.</li>
+            <li>Load Sample → click rows → the map renders by default; toggle Street/Satellite.</li>
+            <li>Upload your PropStream contact export CSV → rows & multi-channel contact details appear.</li>
             <li>Switch Import mode between <i>Append</i> (de-dup APN+Address) and <i>Replace</i>.</li>
             <li>Use <b>Geocode Missing</b> to add coordinates for rows without lat/lon (progress updates, saved locally).</li>
-            <li>Use <b>Estimate Selected</b> / <b>Estimate All Missing</b> for auto-valuation from comps.</li>
-            <li>Adjust comps radius to see nearby properties from your dataset.</li>
-            <li>Buyers: upload CSV, filter by county, acres, and price; add single buyer.</li>
+            <li>Open the <b>Contact Details</b> panel to try Call/Text/Email/Copy actions and confirm DNC badges.</li>
+            <li>Capture outreach in the <b>Communication History</b> panel and History Log, including next action dates.</li>
+            <li>Buyers: upload CSV, filter by county, acres, and price; use <b>Match To Selected Lead</b> to surface matches.</li>
+            <li>Assign and unassign buyers from leads to verify status notes sync across both histories.</li>
             <li>Refresh the page — everything persists via LocalStorage.</li>
           </ul>
         </div>
       );
     }
-
-    const sampleLeads = [
-      { "Owner Name": "John & Jane Sample", County: "Citrus", "Site Address": "1234 W Elm Dr, Citrus Springs, FL 34433", "Estimated Market Value": "$12,500", Latitude: 28.9723, Longitude: -82.4891, APN: "18E17S100010 01230 0120", Acreage: "0.24" },
-      { "Owner Name": "Acme Holdings LLC", County: "Citrus", "Site Address": "9876 N Maple Way, Citrus Springs, FL 34433", "Estimated Market Value": "$14,900", Latitude: 28.9677, Longitude: -82.4612, APN: "18E17S100020 04560 0070", Acreage: "0.25" },
-    ];
 
     ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
   </script>
