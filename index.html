@@ -62,6 +62,11 @@
     .count-card{border:1px solid var(--line);border-radius:12px;padding:12px;background:#f8fafc;text-align:center}
     .count-card .label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px}
     .count-card .value{font-size:20px;font-weight:700;color:var(--ink)}
+    .toast-container{position:fixed;right:24px;bottom:24px;z-index:1200;display:flex;flex-direction:column;gap:12px}
+    .toast{background:#0f172a;color:#fff;padding:12px 16px;border-radius:12px;box-shadow:0 20px 40px rgba(15,23,42,.25);min-width:240px}
+    .toast .counts{display:flex;gap:12px;margin-top:8px;font-size:12px}
+    .toast .counts span{display:flex;flex-direction:column}
+    .toast .counts strong{font-size:18px}
   </style>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -72,6 +77,7 @@
 
   <script crossorigin src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="crm-logic.js"></script>
+  <script src="ingest-normalize.js"></script>
   <script type="text/babel">
     const {useEffect, useMemo, useRef, useState} = React;
 
@@ -298,8 +304,44 @@
       if(digits.length===10) return `+1${digits}`;
       return digits;
     };
+    const formatNormalizedPhone = (digits)=>{
+      const clean = String(digits ?? "").replace(/\D/g,"");
+      if(clean.length===10){
+        return `(${clean.slice(0,3)}) ${clean.slice(3,6)}-${clean.slice(6)}`;
+      }
+      if(clean.length===11 && clean.startsWith("1")){
+        return `(${clean.slice(1,4)}) ${clean.slice(4,7)}-${clean.slice(7)}`;
+      }
+      return String(digits ?? "");
+    };
     const extractPhones = (lead)=>{
       if(!lead) return [];
+      const normalized = Array.isArray(lead.__phonesNormalized) ? lead.__phonesNormalized : null;
+      const normalizedDNC = Boolean(lead.__dncNormalized);
+      const buildEntry = (value, index, fieldLabel='Phone')=>{
+        const href = normalizePhoneHref(value);
+        if(!href) return null;
+        return {
+          field: fieldLabel,
+          value,
+          href,
+          isDNC: normalizedDNC,
+          isPrimary: index === 0
+        };
+      };
+      if(normalized && normalized.length){
+        const seen = new Set();
+        const entries = [];
+        normalized.forEach((digits, idx)=>{
+          const formatted = formatNormalizedPhone(digits);
+          const href = normalizePhoneHref(digits);
+          if(!href || seen.has(href)) return;
+          seen.add(href);
+          const entry = buildEntry(formatted, idx, `Phone ${idx+1}`);
+          if(entry) entries.push(entry);
+        });
+        if(entries.length) return entries;
+      }
       const dncs = new Set(DNC_FIELDS.filter(field=>{
         const value = String(lead[field] ?? "").trim().toLowerCase();
         return value && DNC_VALUES.has(value);
@@ -327,6 +369,22 @@
     };
     const extractEmails = (lead)=>{
       if(!lead) return [];
+      const normalized = Array.isArray(lead.__emailsNormalized) ? lead.__emailsNormalized : null;
+      if(normalized && normalized.length){
+        const seen = new Set();
+        const entries = [];
+        normalized.forEach((email, idx)=>{
+          const lower = String(email ?? "").toLowerCase();
+          if(!lower || seen.has(lower)) return;
+          seen.add(lower);
+          entries.push({
+            field: `Email ${idx+1}`,
+            value: email,
+            isPrimary: idx === 0
+          });
+        });
+        if(entries.length) return entries;
+      }
       const seen = new Set();
       const entries = [];
       EMAIL_FIELDS.forEach((field)=>{
@@ -491,6 +549,7 @@
       const [geocodeStatus, setGeocodeStatus] = useState("");
       const [bulkSelection, setBulkSelection] = useState(()=>[]);
       const [importPreview, setImportPreview] = useState(null);
+      const [importToast, setImportToast] = useState(null);
       const geocodeCacheRef = useRef(new Map());
       const geocodeThrottleRef = useRef({last:0});
       const selectAllRef = useRef(null);
@@ -559,6 +618,11 @@
         }
       },[leads]);
       useEffect(()=>{ leadsRef.current = leads; },[leads]);
+      useEffect(()=>{
+        if(!importToast) return;
+        const timer = setTimeout(()=> setImportToast(null), 6000);
+        return ()=> clearTimeout(timer);
+      },[importToast]);
       useEffect(()=>{
         try{
           if(typeof localStorage !== "undefined"){
@@ -835,9 +899,321 @@
             changed=true;
             if(summary.new.length<5) summary.new.push(describeLead(candidate));
           }
-        }
-        return {next:changed ? next : baseExisting, counts, summary, changed};
       }
+      return {next:changed ? next : baseExisting, counts, summary, changed};
+    }
+    const FALLBACK_CLEAN_PHONE = (value)=>{
+      const digits = String(value ?? "").replace(/[^0-9]+/g,"");
+      if(digits.length===11 && digits.startsWith("1")) return digits.slice(1);
+      return digits;
+    };
+    const FALLBACK_CLEAN_EMAIL = (value)=> String(value ?? "").trim().toLowerCase();
+    const canonicalComparable = (record)=>{
+      if(!record) return null;
+      const address = record.address || {};
+      const normalizeNumber = (value)=> Number.isFinite(value) ? Number(value) : null;
+      const sortedPhones = Array.isArray(record.phones) ? record.phones.slice().sort() : [];
+      const sortedEmails = Array.isArray(record.emails) ? record.emails.slice().sort() : [];
+      return {
+        owner: record.owner || "",
+        address: {
+          line1: address.line1 || "",
+          city: address.city || "",
+          state: address.state || "",
+          zip: address.zip || ""
+        },
+        county: record.county || "",
+        apn: record.apn || "",
+        acreage: record.acreage ?? null,
+        estValue: record.estValue ?? null,
+        lat: normalizeNumber(record.lat),
+        lng: normalizeNumber(record.lng),
+        phones: sortedPhones,
+        emails: sortedEmails,
+        dnc: Boolean(record.dnc)
+      };
+    };
+    const canonicalEquals = (a, b)=>{
+      const left = canonicalComparable(a);
+      const right = canonicalComparable(b);
+      return JSON.stringify(left) === JSON.stringify(right);
+    };
+    const ensureLandIngest = ()=>{
+      const ingest = window.LandIngest;
+      if(!ingest || typeof ingest.mapRowToCanonical !== "function" || typeof ingest.recordKey !== "function"){
+        throw new Error('Import normalizer module missing');
+      }
+      return ingest;
+    };
+    function leadRecordToCanonical(lead){
+      if(!lead || typeof lead !== 'object') return null;
+      const ingest = ensureLandIngest();
+      const internals = ingest.__internal || {};
+      const cleanPhone = internals.cleanPhone || FALLBACK_CLEAN_PHONE;
+      const cleanEmail = internals.cleanEmail || FALLBACK_CLEAN_EMAIL;
+      const row = {
+        'Owner Name': lead['Owner Name'] ?? lead.owner ?? '',
+        'Site Address': lead['Site Address'] ?? '',
+        City: lead['City'] ?? '',
+        State: lead['State'] ?? '',
+        Zip: lead['Zip'] ?? '',
+        County: lead['County'] ?? '',
+        APN: lead['APN'] ?? '',
+        Acreage: lead['Acreage'] ?? '',
+        'Estimated Market Value': lead['Estimated Market Value'] ?? '',
+        Latitude: lead.Latitude ?? lead['Latitude'],
+        Longitude: lead.Longitude ?? lead['Longitude'],
+        DNC: lead.__dncNormalized ? 'yes' : (lead.DNC || lead['DNC'] || '')
+      };
+      PHONE_FIELDS.forEach(field=>{
+        const raw = lead[field];
+        if(raw !== null && raw !== undefined && String(raw).trim() !== ''){
+          row[field] = raw;
+        }
+      });
+      EMAIL_FIELDS.forEach(field=>{
+        const raw = lead[field];
+        if(raw !== null && raw !== undefined && String(raw).trim() !== ''){
+          row[field] = raw;
+        }
+      });
+      const canonical = ingest.mapRowToCanonical(row, 'existing');
+      if(Array.isArray(lead.__phonesNormalized) && lead.__phonesNormalized.length){
+        const merged = new Set(canonical.phones || []);
+        lead.__phonesNormalized.forEach(value=>{
+          const cleaned = cleanPhone(value);
+          if(/^\d{10}$/.test(cleaned)) merged.add(cleaned);
+        });
+        canonical.phones = Array.from(merged);
+      }
+      if(Array.isArray(lead.__emailsNormalized) && lead.__emailsNormalized.length){
+        const merged = new Set(canonical.emails || []);
+        lead.__emailsNormalized.forEach(value=>{
+          const cleaned = cleanEmail(value);
+          if(cleaned) merged.add(cleaned);
+        });
+        canonical.emails = Array.from(merged);
+      }
+      if(lead.__dncNormalized) canonical.dnc = true;
+      canonical.id = lead.__id || canonical.id;
+      canonical.history = Array.isArray(lead.__history) ? lead.__history.map(entry=>({...entry})) : [];
+      canonical.notes = Array.isArray(lead.__notes) ? lead.__notes.slice() : [];
+      canonical.source = lead.__source || canonical.source || 'existing';
+      canonical.__existingLead = lead;
+      return canonical;
+    }
+    function canonicalToLeadRecord(canonical, existingLead, status){
+      if(!canonical) return existingLead || null;
+      const ingest = ensureLandIngest();
+      const internals = ingest.__internal || {};
+      const cleanPhone = internals.cleanPhone || FALLBACK_CLEAN_PHONE;
+      const cleanEmail = internals.cleanEmail || FALLBACK_CLEAN_EMAIL;
+      const base = existingLead ? cloneLeadForState(existingLead) : {};
+      const next = {...base};
+      next.__source = canonical.source || next.__source || 'import';
+      if(canonical.owner) next['Owner Name'] = canonical.owner;
+      if(canonical.county) next['County'] = canonical.county;
+      if(canonical.address){
+        const {line1, city, state, zip} = canonical.address;
+        if(line1) next['Site Address'] = line1;
+        if(city) next['City'] = city;
+        if(state) next['State'] = state;
+        if(zip) next['Zip'] = zip;
+        if(line1 && city && state){
+          const combined = `${line1}, ${city}, ${state}${zip?` ${zip}`:''}`.replace(/,\s*,/g,', ').trim();
+          if(!next['Site Address']) next['Site Address'] = combined;
+        }
+      }
+      if(canonical.apn) next.APN = canonical.apn;
+      if(Number.isFinite(canonical.acreage)) next['Acreage'] = canonical.acreage;
+      if(Number.isFinite(canonical.estValue)) next['Estimated Market Value'] = canonical.estValue;
+      if(Number.isFinite(canonical.lat)) next.Latitude = canonical.lat;
+      if(Number.isFinite(canonical.lng)) next.Longitude = canonical.lng;
+
+      const phones = Array.isArray(canonical.phones) ? canonical.phones.filter(Boolean) : [];
+      const phoneDisplayMap = new Map();
+      if(existingLead){
+        PHONE_FIELDS.forEach(field=>{
+          const raw = existingLead[field];
+          if(!raw && raw !== 0) return;
+          const cleaned = cleanPhone(raw);
+          if(/^\d{10}$/.test(cleaned) && !phoneDisplayMap.has(cleaned)){
+            phoneDisplayMap.set(cleaned, String(raw));
+          }
+        });
+        if(Array.isArray(existingLead.__phonesNormalized)){
+          existingLead.__phonesNormalized.forEach(value=>{
+            const cleaned = cleanPhone(value);
+            if(/^\d{10}$/.test(cleaned) && !phoneDisplayMap.has(cleaned)){
+              phoneDisplayMap.set(cleaned, formatNormalizedPhone(cleaned));
+            }
+          });
+        }
+      }
+      next.__phonesNormalized = phones.slice();
+      ['Phone 1','Phone 2','Phone 3'].forEach((field, idx)=>{
+        const digits = phones[idx];
+        if(digits){
+          const display = phoneDisplayMap.get(digits) || formatNormalizedPhone(digits);
+          next[field] = display;
+        }else if(field in next){
+          delete next[field];
+        }
+      });
+
+      const emails = Array.isArray(canonical.emails) ? canonical.emails.filter(Boolean) : [];
+      const emailDisplayMap = new Map();
+      if(existingLead){
+        EMAIL_FIELDS.forEach(field=>{
+          const raw = existingLead[field];
+          if(!raw) return;
+          emailDisplayMap.set(String(raw).toLowerCase(), String(raw));
+        });
+        if(Array.isArray(existingLead.__emailsNormalized)){
+          existingLead.__emailsNormalized.forEach(value=>{
+            const lower = String(value).toLowerCase();
+            if(lower && !emailDisplayMap.has(lower)) emailDisplayMap.set(lower, value);
+          });
+        }
+      }
+      next.__emailsNormalized = emails.slice();
+      ['Email 1','Email 2','Email 3'].forEach((field, idx)=>{
+        const email = emails[idx];
+        if(email){
+          const lower = String(email).toLowerCase();
+          const display = emailDisplayMap.get(lower) || email;
+          next[field] = display;
+        }else if(field in next){
+          delete next[field];
+        }
+      });
+
+      next.__dncNormalized = Boolean(canonical.dnc);
+      next.DNC = canonical.dnc ? 'Yes' : '';
+      if(!Array.isArray(next.__history) || !next.__history.length){
+        next.__history = Array.isArray(canonical.history) ? canonical.history.map(entry=>({...entry})) : [];
+        next.__log = next.__history;
+      }
+      if(!Array.isArray(next.__notes) || !next.__notes.length){
+        next.__notes = Array.isArray(canonical.notes) ? canonical.notes.slice() : [];
+      }
+      next.__id = existingLead?.__id || canonical.id || next.__id || makeId();
+      if(status){
+        next.__importStatus = status;
+        next.__importTimestamp = Date.now();
+      }else{
+        if('__importStatus' in next) delete next.__importStatus;
+      }
+      return next;
+    }
+    async function prepareAppendDedupImport(file){
+      const ingest = ensureLandIngest();
+      const name = file?.name || '';
+      const isXlsx = /\.xlsx?$/i.test(name);
+      let incoming = [];
+      if(isXlsx){
+        const buffer = await file.arrayBuffer();
+        incoming = ingest.parseXlsxToCanonical(buffer, name);
+      }else{
+        const text = await file.text();
+        incoming = ingest.parseCsvToCanonical(text, name);
+      }
+      const incomingCanonicals = Array.isArray(incoming) ? incoming.filter(Boolean) : [];
+      if(!incomingCanonicals.length){
+        return {
+          incoming: [],
+          counts: {new:0, merged:0, skipped:0},
+          summary: {new:[], merged:[], skipped:['No importable rows detected']},
+          nextLeads: leadsRef.current.map(cloneLeadForState),
+          changed: false
+        };
+      }
+      const existingClones = leadsRef.current.map(cloneLeadForState);
+      const existingIndexByKey = new Map();
+      const existingCanonicalByKey = new Map();
+      existingClones.forEach((lead, idx)=>{
+        const canonical = leadRecordToCanonical(lead);
+        if(!canonical) return;
+        const key = ingest.recordKey(canonical);
+        if(!key) return;
+        existingIndexByKey.set(key, idx);
+        existingCanonicalByKey.set(key, canonical);
+      });
+      const existingCanonicals = Array.from(existingCanonicalByKey.values());
+      const mergedCanonicals = ingest.mergeCanonical(existingCanonicals, incomingCanonicals);
+      const mergedByKey = new Map();
+      mergedCanonicals.forEach(record=>{
+        const key = ingest.recordKey(record);
+        if(key) mergedByKey.set(key, record);
+      });
+      const counts = {new:0, merged:0, skipped:0};
+      const summary = {new:[], merged:[], skipped:[]};
+      const statusByKey = new Map();
+      let notedMissingKey = false;
+      incomingCanonicals.forEach(record=>{
+        const key = ingest.recordKey(record);
+        if(!key){
+          counts.skipped += 1;
+          if(!notedMissingKey && summary.skipped.length<5){
+            summary.skipped.push('Row missing APN and owner/address details');
+            notedMissingKey = true;
+          }
+          return;
+        }
+        const before = existingCanonicalByKey.get(key);
+        const after = mergedByKey.get(key);
+        if(!before){
+          if(after){
+            counts.new += 1;
+            statusByKey.set(key,'new');
+            if(summary.new.length<5){
+              const preview = canonicalToLeadRecord(after, null, null);
+              summary.new.push(describeLead(preview));
+            }
+          }
+          return;
+        }
+        if(!after){
+          counts.skipped += 1;
+          return;
+        }
+        if(canonicalEquals(before, after)){
+          counts.skipped += 1;
+          statusByKey.set(key,'skipped');
+          if(summary.skipped.length<5){
+            summary.skipped.push(describeLead(before.__existingLead || existingClones[existingIndexByKey.get(key)]));
+          }
+        }else{
+          counts.merged += 1;
+          statusByKey.set(key,'merged');
+          if(summary.merged.length<5){
+            const preview = canonicalToLeadRecord(after, before.__existingLead || existingClones[existingIndexByKey.get(key)], null);
+            summary.merged.push(describeLead(preview));
+          }
+        }
+      });
+      const changed = (counts.new + counts.merged) > 0;
+      mergedCanonicals.forEach(record=>{
+        const key = ingest.recordKey(record);
+        if(!key) return;
+        const status = statusByKey.get(key) || null;
+        if(existingIndexByKey.has(key)){
+          const idx = existingIndexByKey.get(key);
+          const existingLead = existingClones[idx];
+          existingClones[idx] = canonicalToLeadRecord(record, existingLead, status === 'skipped' ? null : status);
+        }else{
+          const created = canonicalToLeadRecord(record, null, status || 'new');
+          existingClones.push(created);
+        }
+      });
+      return {
+        incoming: incomingCanonicals,
+        counts,
+        summary,
+        nextLeads: existingClones,
+        changed
+      };
+    }
       async function readWorkbookRows(file){
         if(!file) return [];
         if(typeof XLSX === 'undefined') throw new Error('SheetJS library not loaded');
@@ -855,12 +1231,28 @@
         const file=input.files && input.files[0];
         if(!file) return;
         try{
-          const rows=await readWorkbookRows(file);
-          if(!rows.length) throw new Error('No rows detected in file');
-          const objects=rowsToObjects(rows).map(cleanLeadRecord);
-          if(!objects.length) throw new Error('No importable leads detected');
-          const analysis=mergeLeadBatch(leadsRef.current, objects, importMode);
-          setImportPreview({ type:'leads', fileName:file.name, mode:importMode, counts:analysis.counts, summary:analysis.summary, incoming:objects });
+          if(importMode === 'append'){
+            const analysis = await prepareAppendDedupImport(file);
+            if(!analysis.incoming.length){
+              throw new Error('No importable leads detected');
+            }
+            setImportPreview({
+              type:'leads',
+              fileName:file.name,
+              mode:importMode,
+              counts:analysis.counts,
+              summary:analysis.summary,
+              incoming:analysis.incoming,
+              canonicalResult:analysis
+            });
+          }else{
+            const rows=await readWorkbookRows(file);
+            if(!rows.length) throw new Error('No rows detected in file');
+            const objects=rowsToObjects(rows).map(cleanLeadRecord);
+            if(!objects.length) throw new Error('No importable leads detected');
+            const analysis=mergeLeadBatch(leadsRef.current, objects, importMode);
+            setImportPreview({ type:'leads', fileName:file.name, mode:importMode, counts:analysis.counts, summary:analysis.summary, incoming:objects });
+          }
         }catch(err){
           console.error('Lead import failed', err);
           alert('Unable to import leads: '+(err?.message || err));
@@ -888,11 +1280,30 @@
       const confirmImportPreview = ()=>{
         if(!importPreview) return;
         if(importPreview.type === 'leads'){
-          const result=mergeLeadBatch(leadsRef.current, importPreview.incoming, importPreview.mode);
-          if(result.changed){
-            setLeads(result.next);
-            setBulkSelection([]);
-            setSelectedIndex(0);
+          if(importPreview.mode === 'append' && importPreview.canonicalResult){
+            const result = importPreview.canonicalResult;
+            if(result.changed){
+              setLeads(result.nextLeads);
+              setBulkSelection([]);
+              setSelectedIndex(0);
+            }
+            setImportToast({
+              fileName: importPreview.fileName,
+              counts: result.counts,
+              timestamp: Date.now()
+            });
+          }else{
+            const result=mergeLeadBatch(leadsRef.current, importPreview.incoming, importPreview.mode);
+            if(result.changed){
+              setLeads(result.next);
+              setBulkSelection([]);
+              setSelectedIndex(0);
+            }
+            setImportToast({
+              fileName: importPreview.fileName,
+              counts: result.counts,
+              timestamp: Date.now()
+            });
           }
         }
         setImportPreview(null);
@@ -1421,6 +1832,19 @@
       // UI
       return (
         <>
+          {importToast && (
+            <div className="toast-container">
+              <div className="toast">
+                <div style={{fontWeight:600,fontSize:"14px"}}>Import summary</div>
+                <div className="muted small">{importToast.fileName || 'Import'}{importToast.timestamp ? ` · ${new Date(importToast.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}` : ''}</div>
+                <div className="counts">
+                  <span><strong>{importToast.counts?.new ?? 0}</strong><small style={{opacity:0.75}}>Created</small></span>
+                  <span><strong>{importToast.counts?.merged ?? 0}</strong><small style={{opacity:0.75}}>Merged</small></span>
+                  <span><strong>{importToast.counts?.skipped ?? 0}</strong><small style={{opacity:0.75}}>Skipped</small></span>
+                </div>
+              </div>
+            </div>
+          )}
           <h1>🏡 Wholesale Land CRM (Web)</h1>
           <div className="tabs row mb-16">
             <button className={tab==="leads"?"active":""} onClick={()=>setTab("leads")}>Leads</button>
@@ -1871,7 +2295,7 @@
                 <div className="modal-body">
                   <p style={{margin:"0 0 6px"}}><strong>{importPreview.fileName || "Import"}</strong></p>
                   <p className="muted small" style={{margin:"0 0 16px"}}>
-                    Mode: {importPreview.mode === 'replace' ? 'Replace all leads (overwrite existing records)' : 'Append & merge by APN + County'}
+                    Mode: {importPreview.mode === 'replace' ? 'Replace all leads (overwrite existing records)' : 'Append & merge by APN (fallback owner + address + ZIP)'}
                   </p>
                   <div className="count-grid">
                     <div className="count-card">
