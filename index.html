@@ -550,6 +550,11 @@
       const [bulkSelection, setBulkSelection] = useState(()=>[]);
       const [importPreview, setImportPreview] = useState(null);
       const [importToast, setImportToast] = useState(null);
+      const [autoMergeWithoutApn, setAutoMergeWithoutApn] = useState(true);
+      const [preventCrossZipMerge, setPreventCrossZipMerge] = useState(true);
+      const [reviewQueue, setReviewQueue] = useState([]);
+      const [reviewModalOpen, setReviewModalOpen] = useState(false);
+      const [invalidRows, setInvalidRows] = useState([]);
       const geocodeCacheRef = useRef(new Map());
       const geocodeThrottleRef = useRef({last:0});
       const selectAllRef = useRef(null);
@@ -1122,96 +1127,114 @@
       if(!incomingCanonicals.length){
         return {
           incoming: [],
-          counts: {new:0, merged:0, skipped:0},
-          summary: {new:[], merged:[], skipped:['No importable rows detected']},
+          counts: { processed: 0, created: 0, merged: 0, flagged: 0, invalid: 0 },
+          summary: { created: [], merged: [], flagged: [], invalid: ['No importable rows detected'] },
           nextLeads: leadsRef.current.map(cloneLeadForState),
-          changed: false
+          changed: false,
+          reviewQueue: [],
+          invalidRows: []
         };
       }
+
       const existingClones = leadsRef.current.map(cloneLeadForState);
-      const existingIndexByKey = new Map();
-      const existingCanonicalByKey = new Map();
-      existingClones.forEach((lead, idx)=>{
+      const idToIndex = new Map();
+      existingClones.forEach((lead, idx)=>{ if(lead?.__id) idToIndex.set(lead.__id, idx); });
+
+      const existingCanonicals = [];
+      existingClones.forEach(lead => {
         const canonical = leadRecordToCanonical(lead);
-        if(!canonical) return;
+        if(canonical) existingCanonicals.push(canonical);
+      });
+
+      const mergeOptions = { autoMergeWithoutApn, preventCrossZip: preventCrossZipMerge };
+      const mergeResult = ingest.mergeCanonical(existingCanonicals, incomingCanonicals, mergeOptions) || {};
+
+      const counts = {
+        processed: mergeResult.summary?.processed ?? 0,
+        created: mergeResult.summary?.created ?? 0,
+        merged: mergeResult.summary?.merged ?? 0,
+        flagged: mergeResult.summary?.flagged ?? 0,
+        invalid: mergeResult.summary?.invalid ?? 0
+      };
+      counts.new = counts.created;
+      counts.skipped = counts.invalid;
+
+      const statusByKey = mergeResult.statusByKey instanceof Map ? mergeResult.statusByKey : new Map();
+      const nextLeads = existingClones.slice();
+      const keyToExistingIndex = new Map();
+      existingCanonicals.forEach((canonical, idx)=>{
         const key = ingest.recordKey(canonical);
-        if(!key) return;
-        existingIndexByKey.set(key, idx);
-        existingCanonicalByKey.set(key, canonical);
+        if(key) keyToExistingIndex.set(key, idx);
       });
-      const existingCanonicals = Array.from(existingCanonicalByKey.values());
-      const mergedCanonicals = ingest.mergeCanonical(existingCanonicals, incomingCanonicals);
-      const mergedByKey = new Map();
-      mergedCanonicals.forEach(record=>{
+
+      const updateExistingLead = (record, status)=>{
         const key = ingest.recordKey(record);
-        if(key) mergedByKey.set(key, record);
-      });
-      const counts = {new:0, merged:0, skipped:0};
-      const summary = {new:[], merged:[], skipped:[]};
-      const statusByKey = new Map();
-      let notedMissingKey = false;
-      incomingCanonicals.forEach(record=>{
+        const existingLead = record.__existingLead;
+        if(existingLead && idToIndex.has(existingLead.__id)){
+          const idx = idToIndex.get(existingLead.__id);
+          nextLeads[idx] = canonicalToLeadRecord(record, existingLead, status);
+          return true;
+        }
+        if(key && keyToExistingIndex.has(key)){
+          const idx = keyToExistingIndex.get(key);
+          const baseCanonical = existingCanonicals[idx];
+          const baseLead = baseCanonical?.__existingLead || existingClones[idx];
+          if(Number.isInteger(idx)){
+            const targetIdx = baseLead?.__id && idToIndex.has(baseLead.__id) ? idToIndex.get(baseLead.__id) : idx;
+            nextLeads[targetIdx] = canonicalToLeadRecord(record, baseLead || existingClones[targetIdx], status);
+            return true;
+          }
+        }
+        return false;
+      };
+
+      const records = Array.isArray(mergeResult.records) ? mergeResult.records : [];
+      records.forEach(record => {
         const key = ingest.recordKey(record);
-        if(!key){
-          counts.skipped += 1;
-          if(!notedMissingKey && summary.skipped.length<5){
-            summary.skipped.push('Row missing APN and owner/address details');
-            notedMissingKey = true;
-          }
-          return;
-        }
-        const before = existingCanonicalByKey.get(key);
-        const after = mergedByKey.get(key);
-        if(!before){
-          if(after){
-            counts.new += 1;
-            statusByKey.set(key,'new');
-            if(summary.new.length<5){
-              const preview = canonicalToLeadRecord(after, null, null);
-              summary.new.push(describeLead(preview));
-            }
-          }
-          return;
-        }
-        if(!after){
-          counts.skipped += 1;
-          return;
-        }
-        if(canonicalEquals(before, after)){
-          counts.skipped += 1;
-          statusByKey.set(key,'skipped');
-          if(summary.skipped.length<5){
-            summary.skipped.push(describeLead(before.__existingLead || existingClones[existingIndexByKey.get(key)]));
-          }
-        }else{
-          counts.merged += 1;
-          statusByKey.set(key,'merged');
-          if(summary.merged.length<5){
-            const preview = canonicalToLeadRecord(after, before.__existingLead || existingClones[existingIndexByKey.get(key)], null);
-            summary.merged.push(describeLead(preview));
-          }
+        const status = key ? statusByKey.get(key) || null : null;
+        if(!updateExistingLead(record, status)){
+          const created = canonicalToLeadRecord(record, null, status || 'created');
+          nextLeads.push(created);
         }
       });
-      const changed = (counts.new + counts.merged) > 0;
-      mergedCanonicals.forEach(record=>{
-        const key = ingest.recordKey(record);
-        if(!key) return;
-        const status = statusByKey.get(key) || null;
-        if(existingIndexByKey.has(key)){
-          const idx = existingIndexByKey.get(key);
-          const existingLead = existingClones[idx];
-          existingClones[idx] = canonicalToLeadRecord(record, existingLead, status === 'skipped' ? null : status);
-        }else{
-          const created = canonicalToLeadRecord(record, null, status || 'new');
-          existingClones.push(created);
-        }
-      });
+
+      const describeCanonical = (canonical, existingLead)=>{
+        const preview = canonicalToLeadRecord(canonical, existingLead || canonical.__existingLead || null, null);
+        return describeLead(preview);
+      };
+
+      const createdSummaries = Array.isArray(mergeResult.created) ? mergeResult.created.slice(0,5).map(entry => describeCanonical(entry.record, null)) : [];
+      const mergedSummaries = Array.isArray(mergeResult.merged) ? mergeResult.merged.slice(0,5).map(entry => describeCanonical(entry.after, entry.after.__existingLead || entry.before?.__existingLead || null)) : [];
+      const flaggedSummaries = Array.isArray(mergeResult.reviewQueue) ? mergeResult.reviewQueue.slice(0,5).map(item => {
+        const preview = canonicalToLeadRecord(item.incoming, null, null);
+        const label = describeLead(preview);
+        const scoreLabel = typeof item.score === 'number' ? `score ${item.score.toFixed(2)}` : 'needs review';
+        const reason = item.reason ? ` (${item.reason.replace(/-/g,' ')})` : '';
+        return `${label} · ${scoreLabel}${reason}`;
+      }) : [];
+      const invalidSummaries = Array.isArray(mergeResult.invalid) ? mergeResult.invalid.slice(0,5).map(item => {
+        const record = item?.record || {};
+        const pieces = [record.owner || 'Unknown owner', record.address?.line1 || '', record.address?.city || ''];
+        return `${pieces.filter(Boolean).join(', ')}${item?.reason ? ` (${item.reason})` : ''}`;
+      }) : [];
+
+      const summary = {
+        created: createdSummaries,
+        merged: mergedSummaries,
+        flagged: flaggedSummaries,
+        invalid: invalidSummaries
+      };
+
+      const changed = (counts.created + counts.merged) > 0;
+
       return {
         incoming: incomingCanonicals,
         counts,
         summary,
-        nextLeads: existingClones,
-        changed
+        nextLeads,
+        changed,
+        reviewQueue: mergeResult.reviewQueue || [],
+        invalidRows: mergeResult.invalid || []
       };
     }
       async function readWorkbookRows(file){
@@ -1243,7 +1266,9 @@
               counts:analysis.counts,
               summary:analysis.summary,
               incoming:analysis.incoming,
-              canonicalResult:analysis
+              canonicalResult:analysis,
+              reviewQueue:analysis.reviewQueue,
+              invalidRows:analysis.invalidRows
             });
           }else{
             const rows=await readWorkbookRows(file);
@@ -1287,10 +1312,16 @@
               setBulkSelection([]);
               setSelectedIndex(0);
             }
+            setReviewQueue(result.reviewQueue || []);
+            if((result.reviewQueue || []).length){
+              setReviewModalOpen(true);
+            }
+            setInvalidRows(result.invalidRows || []);
             setImportToast({
               fileName: importPreview.fileName,
               counts: result.counts,
-              timestamp: Date.now()
+              timestamp: Date.now(),
+              invalidRows: result.invalidRows || []
             });
           }else{
             const result=mergeLeadBatch(leadsRef.current, importPreview.incoming, importPreview.mode);
@@ -1299,9 +1330,20 @@
               setBulkSelection([]);
               setSelectedIndex(0);
             }
+            setReviewQueue([]);
+            setInvalidRows([]);
+            const fallbackCounts = {
+              processed: (result.counts?.processed ?? ((result.counts?.new ?? 0) + (result.counts?.merged ?? 0) + (result.counts?.skipped ?? 0))),
+              created: result.counts?.new ?? 0,
+              merged: result.counts?.merged ?? 0,
+              flagged: 0,
+              invalid: result.counts?.skipped ?? 0,
+              new: result.counts?.new ?? 0,
+              skipped: result.counts?.skipped ?? 0
+            };
             setImportToast({
               fileName: importPreview.fileName,
-              counts: result.counts,
+              counts: fallbackCounts,
               timestamp: Date.now()
             });
           }
@@ -1364,6 +1406,7 @@
       const selectedLeadPhones = useMemo(()=> extractPhones(selectedLead), [selectedLead]);
       const selectedLeadHasDNC = useMemo(()=> selectedLeadPhones.some(item=>item.isDNC), [selectedLeadPhones]);
       const selectedLeadEmails = useMemo(()=> extractEmails(selectedLead), [selectedLead]);
+      useEffect(()=>{ if(!reviewQueue.length) setReviewModalOpen(false); },[reviewQueue.length]);
 
       // Map URL
       const mapURL = React.useMemo(()=>{
@@ -1513,6 +1556,25 @@
         const csv = headers.join(",") + "\n" + body;
         const blob = new Blob([csv], {type:"text/csv;charset=utf-8;"}); const url=URL.createObjectURL(blob);
         const a=document.createElement("a"); a.href=url; a.download=filename; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+      }
+
+      function downloadInvalidRowsCsv(rows, filename='invalid-rows.csv'){
+        if(!Array.isArray(rows) || !rows.length) return;
+        const data = rows.map(item=>{
+          const record = item?.record || {};
+          const address = record.address || {};
+          return {
+            Reason: item?.reason || '',
+            Owner: record.owner || '',
+            Address: address.line1 || '',
+            City: address.city || '',
+            State: address.state || '',
+            Zip: address.zip || '',
+            County: record.county || '',
+            APN: record.apn || ''
+          };
+        });
+        exportCSV(data, filename);
       }
 
       // Comps
@@ -1821,13 +1883,29 @@
         setGeocodeStatus(pieces.join(" "));
       }
 
-      const actionableImportCount = importPreview ? Number(importPreview.counts?.new || 0) + Number(importPreview.counts?.merged || 0) : 0;
-      const importSkippedCount = importPreview ? Number(importPreview.counts?.skipped || 0) : 0;
+      const actionableImportCount = importPreview ? Number(importPreview.counts?.created || 0) + Number(importPreview.counts?.merged || 0) : 0;
+      const importFlaggedCount = importPreview ? Number(importPreview.counts?.flagged || 0) : 0;
+      const importInvalidCount = importPreview ? Number(importPreview.counts?.invalid || 0) : 0;
       const importSummarySections = importPreview ? [
-        {label:'New leads', items: importPreview.summary?.new || []},
-        {label:'Updated leads', items: importPreview.summary?.merged || []},
-        {label:'Skipped rows', items: importPreview.summary?.skipped || []}
+        {label:'Created leads', items: importPreview.summary?.created || []},
+        {label:'Merged leads', items: importPreview.summary?.merged || []},
+        {label:'Flagged for review', items: importPreview.summary?.flagged || []},
+        {label:'Invalid rows', items: importPreview.summary?.invalid || []}
       ].filter(section => Array.isArray(section.items) && section.items.length) : [];
+      const reviewSummaries = useMemo(()=>{
+        return reviewQueue.map((item, idx)=>{
+          const existingLead = item?.existing?.__existingLead || null;
+          const existingPreview = item?.existing ? canonicalToLeadRecord(item.existing, existingLead, null) : null;
+          const incomingPreview = item?.incoming ? canonicalToLeadRecord(item.incoming, null, null) : null;
+          return {
+            id: idx,
+            existing: existingPreview,
+            incoming: incomingPreview,
+            score: typeof item?.score === 'number' ? item.score : null,
+            reason: item?.reason || ''
+          };
+        });
+      },[reviewQueue]);
 
       // UI
       return (
@@ -1837,12 +1915,23 @@
               <div className="toast">
                 <div style={{fontWeight:600,fontSize:"14px"}}>Import summary</div>
                 <div className="muted small">{importToast.fileName || 'Import'}{importToast.timestamp ? ` · ${new Date(importToast.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}` : ''}</div>
-                <div className="counts">
-                  <span><strong>{importToast.counts?.new ?? 0}</strong><small style={{opacity:0.75}}>Created</small></span>
+                <div className="counts" style={{display:'grid', gridTemplateColumns:'repeat(5, minmax(0,1fr))', gap:'8px', marginTop:'8px'}}>
+                  <span><strong>{importToast.counts?.processed ?? 0}</strong><small style={{opacity:0.75}}>Processed</small></span>
+                  <span><strong>{importToast.counts?.created ?? 0}</strong><small style={{opacity:0.75}}>Created</small></span>
                   <span><strong>{importToast.counts?.merged ?? 0}</strong><small style={{opacity:0.75}}>Merged</small></span>
-                  <span><strong>{importToast.counts?.skipped ?? 0}</strong><small style={{opacity:0.75}}>Skipped</small></span>
+                  <span><strong>{importToast.counts?.flagged ?? 0}</strong><small style={{opacity:0.75}}>Flagged</small></span>
+                  <span><strong>{importToast.counts?.invalid ?? 0}</strong><small style={{opacity:0.75}}>Invalid</small></span>
                 </div>
+                {importToast.invalidRows?.length ? (
+                  <button className="btn ghost" style={{marginTop:'8px', padding:'4px 10px', fontSize:'12px'}} onClick={()=>downloadInvalidRowsCsv(importToast.invalidRows, `${importToast.fileName || 'import'}-invalid.csv`)}>Download invalid rows</button>
+                ) : null}
               </div>
+              {reviewQueue.length ? (
+                <div className="muted small mb-12" style={{display:'flex', alignItems:'center', gap:'12px', flexWrap:'wrap'}}>
+                  <span>⚠️ {reviewQueue.length} potential match{reviewQueue.length===1?'':'es'} need review before merging.</span>
+                  <button className="btn indigo" style={{padding:'4px 12px'}} onClick={()=>setReviewModalOpen(true)}>Open review queue</button>
+                </div>
+              ) : null}
             </div>
           )}
           <h1>🏡 Wholesale Land CRM (Web)</h1>
@@ -1863,6 +1952,18 @@
                     <option value="replace">Replace all</option>
                   </select>
                 </div>
+                {importMode === 'append' ? (
+                  <div className="row" style={{gap:'12px', alignItems:'center'}}>
+                    <label className="small" style={{display:'flex', alignItems:'center', gap:'6px'}}>
+                      <input type="checkbox" checked={autoMergeWithoutApn} onChange={e=>setAutoMergeWithoutApn(e.target.checked)} />
+                      Auto-merge w/o APN ≥ 0.90
+                    </label>
+                    <label className="small" style={{display:'flex', alignItems:'center', gap:'6px'}}>
+                      <input type="checkbox" checked={preventCrossZipMerge} onChange={e=>setPreventCrossZipMerge(e.target.checked)} />
+                      Never cross-ZIP merges
+                    </label>
+                  </div>
+                ) : null}
                 <input className="input" placeholder="Search owner, county, or address" value={search} onChange={e=>setSearch(e.target.value)} />
                 <select value={countyFilter} onChange={e=>setCountyFilter(e.target.value)}>
                   <option value="">All Counties</option>
@@ -2295,20 +2396,28 @@
                 <div className="modal-body">
                   <p style={{margin:"0 0 6px"}}><strong>{importPreview.fileName || "Import"}</strong></p>
                   <p className="muted small" style={{margin:"0 0 16px"}}>
-                    Mode: {importPreview.mode === 'replace' ? 'Replace all leads (overwrite existing records)' : 'Append & merge by APN (fallback owner + address + ZIP)'}
+                    Mode: {importPreview.mode === 'replace' ? 'Replace all leads (overwrite existing records)' : 'Append & merge with normalized APN, address, and owner matching'}
                   </p>
-                  <div className="count-grid">
+                  <div className="count-grid" style={{gridTemplateColumns:'repeat(5, minmax(0,1fr))'}}>
                     <div className="count-card">
-                      <div className="label">New</div>
-                      <div className="value">{importPreview.counts?.new ?? 0}</div>
+                      <div className="label">Processed</div>
+                      <div className="value">{importPreview.counts?.processed ?? 0}</div>
+                    </div>
+                    <div className="count-card">
+                      <div className="label">Created</div>
+                      <div className="value">{importPreview.counts?.created ?? 0}</div>
                     </div>
                     <div className="count-card">
                       <div className="label">Merged</div>
                       <div className="value">{importPreview.counts?.merged ?? 0}</div>
                     </div>
                     <div className="count-card">
-                      <div className="label">Skipped</div>
-                      <div className="value">{importPreview.counts?.skipped ?? 0}</div>
+                      <div className="label">Flagged</div>
+                      <div className="value">{importPreview.counts?.flagged ?? 0}</div>
+                    </div>
+                    <div className="count-card">
+                      <div className="label">Invalid</div>
+                      <div className="value">{importPreview.counts?.invalid ?? 0}</div>
                     </div>
                   </div>
                   {importSummarySections.length ? (
@@ -2322,17 +2431,68 @@
                     </div>
                   ) : null}
                   {actionableImportCount === 0 ? (
-                    <p className="muted">No new or updated leads detected. All rows in this file were skipped.</p>
+                    <p className="muted">No new or merged leads detected. Review flagged rows before applying.</p>
                   ) : (
                     <p className="muted small" style={{margin:"0"}}>Review the summary above and click Apply to merge these changes.</p>
                   )}
-                  {importSkippedCount > 0 ? (
-                    <p className="muted small" style={{marginTop:"8px"}}>Skipped rows usually miss APN+County or Owner+Address+County.</p>
+                  {importFlaggedCount > 0 ? (
+                    <p className="muted small" style={{marginTop:"8px"}}>{importFlaggedCount} row{importFlaggedCount===1?'':'s'} require manual review. They will remain in the review queue after import.</p>
+                  ) : null}
+                  {importInvalidCount > 0 ? (
+                    <p className="muted small" style={{marginTop:"8px", display:'flex', alignItems:'center', gap:'8px', flexWrap:'wrap'}}>
+                      {importInvalidCount} row{importInvalidCount===1?'':'s'} were invalid (missing APN or address/owner details).
+                      <button className="btn ghost" style={{padding:'4px 10px', fontSize:'12px'}} onClick={()=>downloadInvalidRowsCsv(importPreview.invalidRows, `${importPreview.fileName || 'import'}-invalid.csv`)}>Download invalid rows</button>
+                    </p>
                   ) : null}
                 </div>
                 <div className="modal-footer">
                   <button className="btn ghost" onClick={cancelImportPreview}>Cancel</button>
                   <button className="btn brand" disabled={!actionableImportCount} onClick={confirmImportPreview}>Apply Import</button>
+                </div>
+              </div>
+            </div>
+          )}
+          {reviewModalOpen && (
+            <div className="modal-backdrop">
+              <div className="modal" style={{maxWidth:'720px'}}>
+                <header>Review queue</header>
+                <div className="modal-body" style={{display:'flex', flexDirection:'column', gap:'12px'}}>
+                  {reviewSummaries.length ? reviewSummaries.map(item=>{
+                    const existing = item.existing || {};
+                    const incoming = item.incoming || {};
+                    const formatRow = lead => {
+                      const owner = lead['Owner Name'] || lead.owner || '—';
+                      const addressParts = [lead['Site Address'] || lead.address || '', lead.County || lead['County'] || '', lead['Zip'] || lead.Zip || ''].filter(Boolean);
+                      return { owner, address: addressParts.join(' · ') };
+                    };
+                    const incomingInfo = formatRow(incoming);
+                    const existingInfo = formatRow(existing);
+                    return (
+                      <div key={item.id} style={{border:'1px solid var(--line)', borderRadius:'12px', padding:'12px', background:'#fff'}}>
+                        <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'8px'}}>
+                          <div style={{fontWeight:600}}>Match score: {item.score != null ? item.score.toFixed(2) : '—'}</div>
+                          <div className="muted small">{item.reason ? item.reason.replace(/-/g,' ') : 'Pending review'}</div>
+                        </div>
+                        <div style={{display:'grid', gridTemplateColumns:'repeat(2, minmax(0,1fr))', gap:'12px'}}>
+                          <div>
+                            <div className="muted small" style={{textTransform:'uppercase', letterSpacing:'0.05em'}}>Existing</div>
+                            <div style={{fontWeight:600}}>{existingInfo.owner}</div>
+                            <div className="muted small">{existingInfo.address || '—'}</div>
+                          </div>
+                          <div>
+                            <div className="muted small" style={{textTransform:'uppercase', letterSpacing:'0.05em'}}>Incoming</div>
+                            <div style={{fontWeight:600}}>{incomingInfo.owner}</div>
+                            <div className="muted small">{incomingInfo.address || '—'}</div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }) : (
+                    <p className="muted">No pending matches. Import more data to populate this queue.</p>
+                  )}
+                </div>
+                <div className="modal-footer">
+                  <button className="btn ghost" onClick={()=>setReviewModalOpen(false)}>Close</button>
                 </div>
               </div>
             </div>

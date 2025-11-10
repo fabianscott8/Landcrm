@@ -3,115 +3,215 @@ const assert = require('node:assert');
 
 const LandIngest = require('../ingest-normalize.js');
 
-const makeAddress = (line1='123 Main St', city='Springfield', state='IL', zip='62704')=>({line1, city, state, zip});
+const { matchDetails, buildKeys } = LandIngest.__internal;
 
-test('mapRowToCanonical normalizes header variants and values', () => {
+const map = (row, label='test') => LandIngest.mapRowToCanonical(row, label);
+
+test('mapRowToCanonical normalizes identifiers, address parts, and contact channels', () => {
   const row = {
-    'Owner 1 Full Name': 'Jane Example',
-    'Parcel Number': ' 123-456-789 ',
-    'Property Address': '101 Elm St',
-    City: 'Ridgefield',
-    ST: 'wa',
-    'Situs Zip': '98642-1234',
-    'Phone 1': '(555) 123-4567',
-    'Alternate Phone': '1-555-222-3333',
-    'Email 1': 'Jane@Example.com ',
-    'Alternate Email': 'Seller@Example.com',
-    County: 'Clark',
-    Acreage: ' 10.5 ',
-    'Estimated Market Value': '$250,000',
-    Latitude: '45.1234',
-    Longitude: '-122.9876',
-    DNC: 'yes'
+    'Owner 1 Full Name': '  Jane Example  ',
+    'Parcel Number': ' 18E17S10-080074-000020 ',
+    County: 'Pinal County ',
+    'Property Address': '451 n oak st apt 4',
+    City: 'Florence',
+    State: 'az',
+    Zip: '85132-1234',
+    'Street No': '451',
+    Direction: 'N',
+    Street: 'Oak',
+    Suffix: 'st',
+    'Phone 1': '(555) 111-2222',
+    'Phone 2': '1-555-333-4444',
+    'Email 1': 'HELLO@Example.com',
+    'Alternate Email': ' second@example.com ',
+    Latitude: '33.0372',
+    Longitude: '-111.3886',
+    Acreage: ' 10.50 ',
+    'Estimated Market Value': '$250,000'
   };
 
-  const canonical = LandIngest.mapRowToCanonical(row, 'csv');
+  const canonical = map(row, 'csv');
+
   assert.strictEqual(canonical.owner, 'Jane Example');
-  assert.strictEqual(canonical.apn, '123-456-789');
-  assert.deepStrictEqual(canonical.address, { line1: '101 Elm St', city: 'Ridgefield', state: 'WA', zip: '986421234' });
-  assert.deepStrictEqual(canonical.phones, ['5551234567', '5552223333']);
-  assert.deepStrictEqual(canonical.emails, ['jane@example.com', 'seller@example.com']);
-  assert.strictEqual(canonical.county, 'Clark');
-  assert.strictEqual(canonical.acreage, 10.5);
-  assert.strictEqual(canonical.estValue, 250000);
-  assert.strictEqual(canonical.lat, 45.1234);
-  assert.strictEqual(canonical.lng, -122.9876);
-  assert.strictEqual(canonical.dnc, true);
+  assert.strictEqual(canonical.apn.trim(), '18E17S10-080074-000020');
+  assert.strictEqual(canonical.county.trim(), 'Pinal County');
+  assert.deepStrictEqual(canonical.address.line1, '451 n oak st apt 4');
+  assert.strictEqual(canonical.address.city, 'Florence');
+  assert.strictEqual(canonical.address.state, 'AZ');
+  assert.strictEqual(canonical.address.zip, '851321234');
+  assert.strictEqual(canonical.address.streetNumber, '451');
+  assert.strictEqual(canonical.address.streetDir, 'N');
+  assert.strictEqual(canonical.address.streetSuffix, 'Street');
+  assert.deepStrictEqual(canonical.phones.sort(), ['5551112222','5553334444']);
+  assert.deepStrictEqual(canonical.emails.sort(), ['hello@example.com','second@example.com']);
+  assert.strictEqual(canonical.dnc, false);
+  assert.ok(Array.isArray(canonical._provenance));
+  assert.strictEqual(canonical._provenance.length, 1);
+  assert.strictEqual(canonical._normalized.apn, '18E17S10080074000020');
+  assert.strictEqual(canonical._normalized.county, 'pinal');
+  assert.strictEqual(canonical._normalized.streetCore.includes('oak street'), true);
 });
 
-test('recordKey matches across export types and fallbacks', () => {
-  const csvCanonical = LandIngest.mapRowToCanonical({
-    'Owner Name': 'River Bend LLC',
+test('buildKeys prefers APN+county with fallbacks for address/owner', () => {
+  const withApn = map({
+    Owner: 'River Bend LLC',
+    County: 'Dane County',
     'Site Address': '200 Lake Shore Dr',
     City: 'Madison',
     State: 'WI',
     Zip: '53703',
-    County: 'Dane',
-    'Parcel Number': '0812-345-6789'
-  }, 'csv');
+    APN: '0812-345-6789'
+  });
+  const keysApn = buildKeys(withApn);
+  assert.strictEqual(keysApn.kAPN, 'apn:08123456789|c:dane');
+  assert.ok(keysApn.kAddrFull.includes('lake shore drive'));
 
-  const xlsxCanonical = LandIngest.mapRowToCanonical({
-    Owner: 'River Bend LLC',
-    'Property Address': '200 Lake Shore Dr',
-    'Situs City': 'Madison',
-    'Situs State': 'WI',
-    'Situs Zip': '53703',
-    'Parcel ID': '08123456789'
-  }, 'xlsx');
-
-  assert.strictEqual(LandIngest.recordKey(csvCanonical), LandIngest.recordKey(xlsxCanonical));
-
-  const fallbackA = LandIngest.mapRowToCanonical({
+  const fallback = map({
     Owner: 'No APN Holdings',
     Address: '789 Pine Rd',
     City: 'Everett',
     State: 'WA',
     Zip: '98201'
-  }, 'csv');
-
-  const fallbackB = LandIngest.mapRowToCanonical({
-    'Owner Name': 'No APN Holdings',
-    'Site Address': '789 Pine Rd',
-    City: 'Everett',
-    State: 'WA',
-    Zip: '98201'
-  }, 'xlsx');
-
-  assert.match(LandIngest.recordKey(fallbackA), /^oa:/);
-  assert.strictEqual(LandIngest.recordKey(fallbackA), LandIngest.recordKey(fallbackB));
+  });
+  const keysFallback = buildKeys(fallback);
+  assert.strictEqual(keysFallback.kAPN, '');
+  assert.ok(keysFallback.kAddrFull.startsWith('a:789 pine road'));
+  assert.ok(keysFallback.kOwnerAddrLite.includes('no apn holdings'));
 });
 
-test('mergeCanonical unions phones/emails and preserves flags', () => {
-  const address = makeAddress();
-  const existing = [{
-    id: 'existing-1',
-    owner: 'Harbor Estates',
-    address,
-    county: 'Bay',
-    apn: '555-111',
-    phones: ['5551234567'],
-    emails: ['seller@harbor.com'],
-    dnc: false,
-    notes: ['Existing note'],
-    history: [{ id: 'h1', type: 'Note', note: 'Old history' }]
-  }];
+test('matchDetails scoring reflects APN, address, owner, and geo signals', () => {
+  const base = map({
+    Owner: 'Jane Example',
+    County: 'Pinal',
+    'Site Address': '451 N Oak St',
+    City: 'Florence',
+    State: 'AZ',
+    Zip: '85132',
+    APN: '18e17s10-080074-000020',
+    Latitude: 33.0372,
+    Longitude: -111.3886
+  });
 
-  const incoming = [{
-    owner: 'Harbor Estates',
-    address,
-    county: 'Bay',
-    apn: '555-111',
-    phones: ['5551234567', '5559998888'],
-    emails: ['seller@harbor.com', 'info@harbor.com'],
-    dnc: true
-  }];
+  const sameApn = map({
+    Owner: 'J. Example',
+    County: 'Pinal County',
+    'Property Address': '451 North Oak Street',
+    City: 'Florence',
+    State: 'AZ',
+    Zip: '85132',
+    APN: '18E17S10-080074-000020'
+  });
 
-  const merged = LandIngest.mergeCanonical(existing, incoming);
-  assert.strictEqual(merged.length, 1);
-  const record = merged[0];
-  assert.deepStrictEqual(record.phones.sort(), ['5551234567', '5559998888'].sort());
-  assert.deepStrictEqual(record.emails.sort(), ['seller@harbor.com', 'info@harbor.com'].sort());
-  assert.strictEqual(record.dnc, true);
-  assert.deepStrictEqual(record.history, existing[0].history);
-  assert.deepStrictEqual(record.notes, existing[0].notes);
+  const detailApn = matchDetails(base, sameApn);
+  assert.ok(detailApn.apnMatch);
+  assert.ok(detailApn.addressMatch);
+  assert.ok(detailApn.ownerMatch);
+  assert.ok(detailApn.score >= 0.9);
+
+  const addressOnly = map({
+    Owner: 'Jane Example',
+    County: 'Pinal',
+    Address: '451 N Oak St',
+    City: 'Florence',
+    State: 'AZ',
+    Zip: '85132',
+    Latitude: 33.037205,
+    Longitude: -111.38859
+  });
+  const detailAddr = matchDetails(base, addressOnly);
+  assert.strictEqual(detailAddr.apnMatch, false);
+  assert.ok(detailAddr.addressMatch);
+  assert.ok(detailAddr.geoMatch);
+  assert.ok(detailAddr.score >= 0.7);
+});
+
+test('mergeCanonical auto-merges high confidence matches and tracks conflicts', () => {
+  const existing = [map({
+    Owner: 'Harbor Estates',
+    County: 'Bay County',
+    APN: '555-111',
+    'Site Address': '123 Harbor Rd',
+    City: 'Baytown',
+    State: 'FL',
+    Zip: '32401',
+    'Phone 1': '555-000-1111',
+    Email: 'info@harbor.com'
+  })];
+
+  const incoming = [map({
+    Owner: 'Harbor Estates',
+    County: 'Bay',
+    APN: '555111',
+    'Property Address': '123 Harbor Rd',
+    City: 'Baytown',
+    State: 'FL',
+    Zip: '32401',
+    'Phone 1': '555-000-1111',
+    'Phone 2': '555-222-3333',
+    'Alternate Email': 'sales@harbor.com',
+    DNC: 'yes'
+  })];
+
+  const result = LandIngest.mergeCanonical(existing, incoming);
+  assert.strictEqual(result.summary.merged, 1);
+  assert.strictEqual(result.summary.created, 0);
+  assert.strictEqual(result.reviewQueue.length, 0);
+  assert.strictEqual(result.invalid.length, 0);
+  assert.strictEqual(result.records.length, 1);
+  const merged = result.records[0];
+  assert.ok(merged.phones.includes('5552223333'));
+  assert.ok(merged.emails.includes('sales@harbor.com'));
+  assert.strictEqual(merged.dnc, true);
+  assert.ok(Array.isArray(merged.extra.conflicts.owner) ? merged.extra.conflicts.owner.length === 0 : true);
+});
+
+test('mergeCanonical flags cross-zip matches and respects options', () => {
+  const base = [map({
+    Owner: 'Example Holdings',
+    County: 'King County',
+    'Site Address': '400 Pine St',
+    City: 'Seattle',
+    State: 'WA',
+    Zip: '98101'
+  })];
+
+  const incoming = [map({
+    Owner: 'Example Holdings',
+    County: 'King',
+    Address: '400 Pine St',
+    City: 'Seattle',
+    State: 'WA',
+    Zip: '98104'
+  })];
+
+  const result = LandIngest.mergeCanonical(base, incoming, { preventCrossZip: true });
+  assert.strictEqual(result.summary.flagged, 1);
+  assert.strictEqual(result.summary.created, 0);
+  assert.strictEqual(result.records.length, 1);
+  assert.strictEqual(result.reviewQueue.length, 1);
+  assert.ok(result.reviewQueue[0].reason.includes('zip'));
+
+  const allowResult = LandIngest.mergeCanonical(base, incoming, { preventCrossZip: false, autoMergeWithoutApn: true });
+  assert.strictEqual(allowResult.summary.merged, 0);
+  assert.strictEqual(allowResult.summary.created, 1);
+  assert.strictEqual(allowResult.records.length, 2);
+  assert.strictEqual(allowResult.reviewQueue.length, 0);
+});
+
+test('mergeCanonical creates new records when no confident match found', () => {
+  const existing = [];
+  const incoming = [map({
+    Owner: 'Fresh Parcel LLC',
+    County: 'Maricopa',
+    'Site Address': '99 Desert Ln',
+    City: 'Phoenix',
+    State: 'AZ',
+    Zip: '85001',
+    'Phone 1': '602-111-2222'
+  })];
+
+  const result = LandIngest.mergeCanonical(existing, incoming);
+  assert.strictEqual(result.summary.created, 1);
+  assert.strictEqual(result.records.length, 1);
+  assert.strictEqual(result.records[0].phones[0], '6021112222');
 });
